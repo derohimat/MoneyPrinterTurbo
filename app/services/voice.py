@@ -7,9 +7,35 @@ from xml.sax.saxutils import unescape
 
 import edge_tts
 import requests
-from edge_tts import SubMaker, submaker
-from edge_tts.submaker import mktimestamp
+# from edge_tts import SubMaker, submaker  <-- Removed
+# from edge_tts.submaker import mktimestamp <-- Removed
 from loguru import logger
+
+def mktimestamp(ticks: float) -> str:
+    """
+    Convert 100ns ticks to timestamp format HH:MM:SS.mmm
+    """
+    seconds = ticks / 10_000_000
+    milliseconds = round(seconds * 1000.0)
+    hours = milliseconds // 3600000
+    milliseconds %= 3600000
+    minutes = milliseconds // 60000
+    milliseconds %= 60000
+    seconds = milliseconds // 1000
+    milliseconds %= 1000
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+
+class SubMaker:
+    def __init__(self):
+        self.subs = []
+        self.offset = []
+
+    def create_sub(self, timestamp, text):
+        # timestamp is (offset, duration) in ticks
+        offset, duration = timestamp
+        self.subs.append(text)
+        self.offset.append((offset, offset + duration))
+
 from moviepy.video.tools import subtitles
 from moviepy.audio.io.AudioFileClip import AudioFileClip
 
@@ -1178,8 +1204,8 @@ def azure_tts_v1(
             logger.info(f"start, voice name: {voice_name}, try: {i + 1}")
 
             async def _do() -> SubMaker:
-                communicate = edge_tts.Communicate(text, voice_name, rate=rate_str)
-                sub_maker = edge_tts.SubMaker()
+                communicate = edge_tts.Communicate(text, voice_name, rate=rate_str, boundary="WordBoundary")
+                sub_maker = SubMaker() # Use local SubMaker
                 with open(voice_file, "wb") as file:
                     async for chunk in communicate.stream():
                         if chunk["type"] == "audio":
@@ -1571,7 +1597,7 @@ def _format_text(text: str) -> str:
     return text
 
 
-def create_subtitle(sub_maker: submaker.SubMaker, text: str, subtitle_file: str):
+def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
     """
     优化字幕文件
     1. 将字幕文件按照标点符号分割成多行
@@ -1661,7 +1687,7 @@ def create_subtitle(sub_maker: submaker.SubMaker, text: str, subtitle_file: str)
         logger.error(f"failed, error: {str(e)}")
 
 
-def _get_audio_duration_from_submaker(sub_maker: submaker.SubMaker):
+def _get_audio_duration_from_submaker(sub_maker: SubMaker):
     """
     获取音频时长
     """
@@ -1685,13 +1711,13 @@ def _get_audio_duration_from_mp3(mp3_file: str) -> float:
         logger.error(f"Failed to get audio duration from MP3: {str(e)}")
         return 0.0
 
-def get_audio_duration( target: Union[str, submaker.SubMaker]) -> float:
+def get_audio_duration( target: Union[str, SubMaker]) -> float:
     """
     获取音频时长
     如果是SubMaker对象，则从SubMaker中获取时长
     如果是MP3文件，则从MP3文件中获取时长
     """
-    if isinstance(target, submaker.SubMaker):
+    if isinstance(target, SubMaker):
         return _get_audio_duration_from_submaker(target)
     elif isinstance(target, str) and target.endswith(".mp3"):
         return _get_audio_duration_from_mp3(target)
