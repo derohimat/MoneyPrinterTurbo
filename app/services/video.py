@@ -31,6 +31,7 @@ from app.models.schema import (
 )
 from app.services.utils import video_effects
 from app.utils import utils
+from app.utils import hook_generator
 
 class SubClippedVideoClip:
     def __init__(self, file_path, start_time=None, end_time=None, width=None, height=None, duration=None):
@@ -514,6 +515,53 @@ def generate_video(
 
         watermark_clip = watermark_clip.with_position(wm_pos)
         video_clip = CompositeVideoClip([video_clip, watermark_clip])
+
+    # Hook text overlay (first 3 seconds)
+    overlay_clips = [video_clip]
+    try:
+        hook_text = hook_generator.get_hook_text(category="General", subject=params.video_subject)
+        if hook_text:
+            hook_font = font_path if font_path else "Arial"
+            hook_clip = TextClip(
+                text=hook_text,
+                font=hook_font,
+                font_size=max(36, int(params.font_size * 0.65)),
+                color="#FFFFFF",
+                stroke_color="#000000",
+                stroke_width=2,
+            )
+            hook_clip = hook_clip.with_start(0).with_duration(3)
+            hook_clip = hook_clip.with_position(("center", video_height * 0.15))
+            hook_clip = hook_clip.with_effects([vfx.CrossFadeIn(0.3), vfx.CrossFadeOut(0.5)])
+            overlay_clips.append(hook_clip)
+            logger.info(f"  ⑦ hook: {hook_text}")
+    except Exception as e:
+        logger.warning(f"Hook overlay failed (non-critical): {str(e)}")
+
+    # CTA end screen (last 3 seconds)
+    try:
+        cta_text = hook_generator.get_cta_text()
+        if cta_text and video_clip.duration > 5:
+            cta_font = font_path if font_path else "Arial"
+            cta_clip = TextClip(
+                text=cta_text,
+                font=cta_font,
+                font_size=max(32, int(params.font_size * 0.55)),
+                color="#FFD700",
+                stroke_color="#000000",
+                stroke_width=2,
+            )
+            cta_start = max(0, video_clip.duration - 3)
+            cta_clip = cta_clip.with_start(cta_start).with_duration(3)
+            cta_clip = cta_clip.with_position(("center", video_height * 0.85))
+            cta_clip = cta_clip.with_effects([vfx.CrossFadeIn(0.3)])
+            overlay_clips.append(cta_clip)
+            logger.info(f"  ⑧ CTA: {cta_text}")
+    except Exception as e:
+        logger.warning(f"CTA overlay failed (non-critical): {str(e)}")
+
+    if len(overlay_clips) > 1:
+        video_clip = CompositeVideoClip(overlay_clips)
 
     video_clip.write_videofile(
         output_file,
