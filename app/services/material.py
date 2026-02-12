@@ -11,6 +11,7 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
 from app.utils import utils
+from app.utils import video_scorer
 
 requested_count = 0
 
@@ -333,6 +334,11 @@ def download_videos(
                 logger.error(f"failed to download video: {utils.to_json(item)} => {str(e)}")
 
     logger.success(f"downloaded {len(video_paths)} videos (parallel mode)")
+
+    # Apply quality scoring filter
+    if video_paths:
+        video_paths = video_scorer.filter_videos_by_quality(video_paths, min_score=40)
+
     return video_paths
 
 
