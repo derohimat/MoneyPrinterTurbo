@@ -13,6 +13,7 @@ from app.services import state as sm
 from app.utils import utils
 from app.utils import safety_filters
 from app.utils import metadata_gen
+from app.utils import thumbnail
 
 
 def generate_script(task_id, params):
@@ -369,6 +370,19 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
             logger.info(f"YouTube metadata generated for task {task_id}")
     except Exception as e:
         logger.warning(f"Metadata generation failed (non-critical): {str(e)}")
+
+    # 8. Generate thumbnail
+    try:
+        if final_video_paths:
+            thumb_path = thumbnail.generate_thumbnail(
+                video_path=final_video_paths[0],
+                title=params.video_subject,
+                output_path=os.path.join(utils.task_dir(task_id), "thumbnail.jpg"),
+            )
+            if thumb_path:
+                logger.info(f"Thumbnail generated for task {task_id}")
+    except Exception as e:
+        logger.warning(f"Thumbnail generation failed (non-critical): {str(e)}")
 
     kwargs = {
         "videos": final_video_paths,
