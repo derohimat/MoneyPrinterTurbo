@@ -93,3 +93,18 @@ def get_all_jobs(limit=100):
         return [dict(r) for r in rows]
     except Exception:
         return []
+
+def get_job_by_topic(topic):
+    """Retrieve the latest job for a given topic."""
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM jobs WHERE topic = ? ORDER BY created_at DESC LIMIT 1", (topic,))
+        row = c.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"DB Fetch Error: {e}")
+        return None
+

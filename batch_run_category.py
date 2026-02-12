@@ -27,7 +27,7 @@ VOICE_NAME = "en-US-ChristopherNeural"
 root_dir = os.path.dirname(os.path.abspath(__file__))
 
 
-def run_batch(json_file, category_arg=None, delay_seconds=0):
+def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False):
     logger.remove()
     logger.add(sys.stderr, level="DEBUG")
 
@@ -89,6 +89,17 @@ def run_batch(json_file, category_arg=None, delay_seconds=0):
             category = category_arg
 
         # DB: Insert Job
+        # But first, check for duplicates if not forced
+        if not force_rebuild:
+            existing_job = db.get_job_by_topic(clean_subject)
+            if existing_job and existing_job['status'] == 'success':
+                # Check if file actually exists
+                output_path = existing_job.get('output_path')
+                if output_path and os.path.exists(output_path):
+                    logger.warning(f"Skipping duplicate: {clean_subject} (Job {existing_job['id']})")
+                    results.append({"topic": topic, "status": "skipped", "duration": 0, "file_size": 0, "attempts": 0})
+                    continue
+
         db.insert_job(task_id, clean_subject, category, status="processing")
 
         search_terms = []
@@ -270,6 +281,7 @@ if __name__ == "__main__":
     parser.add_argument('json_file', help='Path to the JSON file containing topics')
     parser.add_argument('--category', help='Force category name for outputs', default=None)
     parser.add_argument('--delay', type=int, help='Delay in seconds before starting', default=0)
+    parser.add_argument('--force', action='store_true', help='Force regeneration even if job exists')
     args = parser.parse_args()
     
-    run_batch(args.json_file, category_arg=args.category, delay_seconds=args.delay)
+    run_batch(args.json_file, category_arg=args.category, delay_seconds=args.delay, force_rebuild=args.force)

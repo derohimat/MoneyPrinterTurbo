@@ -36,7 +36,9 @@ with st.sidebar:
     # Smart Scheduling
     st.subheader("⏰ Smart Scheduling")
     enable_schedule = st.checkbox("Enable Schedule")
+    force_rebuild = st.checkbox("Force Rebuild (Ignore history)")
     delay_seconds = 0
+
     
     if enable_schedule:
         schedule_time = st.time_input("Start Time", value=datetime.now().time())
@@ -54,7 +56,11 @@ with st.sidebar:
             if category_input:
                 cmd.extend(["--category", category_input])
             
+            if force_rebuild:
+                cmd.append("--force")
+
             if enable_schedule and delay_seconds > 0:
+
                 cmd.extend(["--delay", str(delay_seconds)])
                 msg = f"Batch scheduled! Will run in {delay_seconds}s."
             else:
