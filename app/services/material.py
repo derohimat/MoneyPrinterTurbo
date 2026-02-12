@@ -253,24 +253,35 @@ def download_videos(
     valid_video_items = []
     valid_video_urls = []
     found_duration = 0.0
-    search_videos = search_videos_pexels
+
+    # Determine primary and fallback search functions
     if source == "pixabay":
-        search_videos = search_videos_pixabay
+        search_sources = [("pixabay", search_videos_pixabay), ("pexels", search_videos_pexels)]
+    else:
+        search_sources = [("pexels", search_videos_pexels), ("pixabay", search_videos_pixabay)]
 
-    for search_term in search_terms:
-        video_items = search_videos(
-            search_term=search_term,
-            minimum_duration=max_clip_duration,
-            video_aspect=video_aspect,
-            negative_terms=negative_terms,
-        )
-        logger.info(f"found {len(video_items)} videos for '{search_term}'")
+    for source_name, search_videos in search_sources:
+        for search_term in search_terms:
+            video_items = search_videos(
+                search_term=search_term,
+                minimum_duration=max_clip_duration,
+                video_aspect=video_aspect,
+                negative_terms=negative_terms,
+            )
+            logger.info(f"found {len(video_items)} videos for '{search_term}' from {source_name}")
 
-        for item in video_items:
-            if item.url not in valid_video_urls:
-                valid_video_items.append(item)
-                valid_video_urls.append(item.url)
-                found_duration += item.duration
+            for item in video_items:
+                if item.url not in valid_video_urls:
+                    valid_video_items.append(item)
+                    valid_video_urls.append(item.url)
+                    found_duration += item.duration
+
+        # Check if we have enough footage from primary source
+        if found_duration >= audio_duration:
+            logger.info(f"sufficient footage found from {source_name} ({found_duration:.0f}s >= {audio_duration:.0f}s), skipping fallback")
+            break
+        else:
+            logger.warning(f"insufficient footage from {source_name} ({found_duration:.0f}s < {audio_duration:.0f}s), trying next source...")
 
     logger.info(
         f"found total videos: {len(valid_video_items)}, required duration: {audio_duration} seconds, found duration: {found_duration} seconds"
