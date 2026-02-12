@@ -12,6 +12,7 @@ from app.services import llm, material, subtitle, video, voice
 from app.services import state as sm
 from app.utils import utils
 from app.utils import safety_filters
+from app.utils import metadata_gen
 
 
 def generate_script(task_id, params):
@@ -356,6 +357,18 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     logger.success(
         f"task {task_id} finished, generated {len(final_video_paths)} videos."
     )
+
+    # 7. Generate YouTube metadata
+    try:
+        metadata = metadata_gen.generate_youtube_metadata(
+            video_subject=params.video_subject,
+            video_script=video_script,
+            output_dir=utils.task_dir(task_id),
+        )
+        if metadata:
+            logger.info(f"YouTube metadata generated for task {task_id}")
+    except Exception as e:
+        logger.warning(f"Metadata generation failed (non-critical): {str(e)}")
 
     kwargs = {
         "videos": final_video_paths,
