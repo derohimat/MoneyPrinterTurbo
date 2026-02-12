@@ -35,6 +35,7 @@ def search_videos_pexels(
     search_term: str,
     minimum_duration: int,
     video_aspect: VideoAspect = VideoAspect.portrait,
+    negative_terms: List[str] = None,
 ) -> List[MaterialInfo]:
     aspect = VideoAspect(video_aspect)
     video_orientation = aspect.name
@@ -65,6 +66,32 @@ def search_videos_pexels(
         videos = response["videos"]
         # loop through each video in the result
         for v in videos:
+            # check for negative terms
+            if negative_terms:
+                should_skip = False
+                # Pexels video object has 'url' which often contains the title/slug
+                # e.g. https://www.pexels.com/video/a-person-praying-12345/
+                video_url_slug = v.get("url", "").lower()
+                # Check tags if available (Pexels API response usually contains tags in 'tags' list or just keywords in url)
+                # Pexels 'tags' field is list of strings
+                video_tags = [t.lower() for t in v.get("tags", [])]
+                
+                for term in negative_terms:
+                    term = term.lower()
+                    if term in video_url_slug:
+                        should_skip = True
+                        break
+                    for tag in video_tags:
+                        if term in tag:
+                            should_skip = True
+                            break
+                    if should_skip:
+                        break
+                
+                if should_skip:
+                    logger.warning(f"Skipping video due to negative term: {v.get('url')}")
+                    continue
+
             duration = v["duration"]
             # check if video has desired minimum duration
             if duration < minimum_duration:
@@ -92,6 +119,7 @@ def search_videos_pixabay(
     search_term: str,
     minimum_duration: int,
     video_aspect: VideoAspect = VideoAspect.portrait,
+    negative_terms: List[str] = None,
 ) -> List[MaterialInfo]:
     aspect = VideoAspect(video_aspect)
 
@@ -120,6 +148,23 @@ def search_videos_pixabay(
         videos = response["hits"]
         # loop through each video in the result
         for v in videos:
+            # check for negative terms
+            if negative_terms:
+                should_skip = False
+                # Pixabay 'tags' is a comma-separated string
+                video_tags = v.get("tags", "").lower()
+                video_page_url = v.get("pageURL", "").lower()
+
+                for term in negative_terms:
+                    term = term.lower()
+                    if term in video_tags or term in video_page_url:
+                        should_skip = True
+                        break
+                
+                if should_skip:
+                    logger.warning(f"Skipping video due to negative term: {v.get('pageURL')}")
+                    continue
+
             duration = v["duration"]
             # check if video has desired minimum duration
             if duration < minimum_duration:
@@ -202,6 +247,7 @@ def download_videos(
     video_contact_mode: VideoConcatMode = VideoConcatMode.random,
     audio_duration: float = 0.0,
     max_clip_duration: int = 5,
+    negative_terms: List[str] = None,
 ) -> List[str]:
     valid_video_items = []
     valid_video_urls = []
@@ -215,6 +261,7 @@ def download_videos(
             search_term=search_term,
             minimum_duration=max_clip_duration,
             video_aspect=video_aspect,
+            negative_terms=negative_terms,
         )
         logger.info(f"found {len(video_items)} videos for '{search_term}'")
 

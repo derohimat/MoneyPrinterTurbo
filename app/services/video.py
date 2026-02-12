@@ -124,6 +124,8 @@ def combine_videos(
     max_clip_duration: int = 5,
     threads: int = 2,
 ) -> str:
+    if video_transition_mode is None:
+        video_transition_mode = VideoTransitionMode.none
     audio_clip = AudioFileClip(audio_file)
     audio_duration = audio_clip.duration
     logger.info(f"audio duration: {audio_duration} seconds")
@@ -149,7 +151,7 @@ def combine_videos(
 
         while start_time < clip_duration:
             end_time = min(start_time + max_clip_duration, clip_duration)            
-            if clip_duration - start_time >= max_clip_duration:
+            if clip_duration - start_time >= 1.5:
                 subclipped_items.append(SubClippedVideoClip(file_path= video_path, start_time=start_time, end_time=end_time, width=clip_w, height=clip_h))
             start_time = end_time    
             if video_concat_mode.value == VideoConcatMode.sequential.value:

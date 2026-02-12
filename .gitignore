@@ -33,3 +33,10 @@ debug/
 debug_*.py
 test_*.py
 streamlit.log
+
+# Batch generation outputs
+batch_outputs/
+tasks_*.json
+test_*.log
+test_video_gen.py
+batch_run_category.py

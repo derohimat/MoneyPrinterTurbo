@@ -11,6 +11,7 @@ from app.models.schema import VideoConcatMode, VideoParams
 from app.services import llm, material, subtitle, video, voice
 from app.services import state as sm
 from app.utils import utils
+from app.utils import safety_filters
 
 
 def generate_script(task_id, params):
@@ -182,6 +183,7 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             video_contact_mode=params.video_concat_mode,
             audio_duration=audio_duration * params.video_count,
             max_clip_duration=params.video_clip_duration,
+            negative_terms=params.video_negative_terms,
         )
         if not downloaded_videos:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
@@ -245,6 +247,12 @@ def generate_final_videos(
 
 def start(task_id, params: VideoParams, stop_at: str = "video"):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
+
+    # Apply safety filters if negative terms are not explicitly provided
+    if not params.video_negative_terms:
+        params.video_negative_terms = safety_filters.get_negative_terms(params.video_subject)
+        logger.info(f"Auto-applied safety negative terms: {params.video_negative_terms}")
+
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
 
     if type(params.video_concat_mode) is str:
