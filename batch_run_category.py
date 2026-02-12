@@ -15,6 +15,7 @@ from app.models.schema import VideoParams, VideoAspect, VideoConcatMode
 from app.services import task as tm
 from app.config import config
 from app.utils import safety_filters
+from app.utils import bgm_matcher
 
 # VOICES
 VOICE_NAME = "en-US-ChristopherNeural"
@@ -107,6 +108,9 @@ def run_batch(json_file):
             logger.warning(f"Skipping {topic} (File already exists: {final_output_path})")
             continue
 
+        # Get category-matched BGM
+        matched_bgm = bgm_matcher.get_bgm_for_category(category)
+
         # Configure Video Params
         params = VideoParams(
             video_subject=clean_subject,
@@ -119,7 +123,9 @@ def run_batch(json_file):
             video_concat_mode=VideoConcatMode.random,
             subtitle_enabled=True,
             font_size=60,
-            stroke_width=1.5
+            stroke_width=1.5,
+            bgm_type="random" if not matched_bgm else "",
+            bgm_file=matched_bgm,
         )
 
         max_retries = 3
