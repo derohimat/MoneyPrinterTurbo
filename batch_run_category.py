@@ -170,6 +170,7 @@ def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False
             stroke_width=1.5,
             bgm_type="random" if not matched_bgm else "",
             bgm_file=matched_bgm,
+            video_language="en", # Force English
         )
 
         max_retries = 3

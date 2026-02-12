@@ -52,7 +52,13 @@ with st.sidebar:
 
     if st.button("Start Batch Processing", type="primary"):
         if selected_file:
-            cmd = [sys.executable, os.path.join(root_dir, "batch_run_category.py"), selected_file]
+            # Check for venv python
+            python_exe = sys.executable
+            venv_python = os.path.join(root_dir, "venv", "Scripts", "python.exe")
+            if os.path.exists(venv_python):
+                python_exe = venv_python
+
+            cmd = [python_exe, os.path.join(root_dir, "batch_run_category.py"), selected_file]
             if category_input:
                 cmd.extend(["--category", category_input])
             
