@@ -19,6 +19,7 @@ from app.config import config
 from app.utils import safety_filters
 from app.utils import bgm_matcher
 from app.utils import cleanup
+from app.utils import db
 
 # VOICES
 VOICE_NAME = "en-US-ChristopherNeural"
@@ -26,9 +27,12 @@ VOICE_NAME = "en-US-ChristopherNeural"
 root_dir = os.path.dirname(os.path.abspath(__file__))
 
 
-def run_batch(json_file):
+def run_batch(json_file, category_arg=None, delay_seconds=0):
     logger.remove()
     logger.add(sys.stderr, level="DEBUG")
+
+    # Initialize DB
+    db.init_db()
     
     # Read topics from file
     import json
@@ -40,6 +44,12 @@ def run_batch(json_file):
         return
 
     logger.info(f"Loaded {len(topics)} topics from {json_file}")
+
+    # Scheduling Delay
+    if delay_seconds and delay_seconds > 0:
+        logger.info(f"Scheduling: Waiting {delay_seconds} seconds before starting...")
+        time_module.sleep(delay_seconds)
+
 
     # Progress tracking
     batch_start_time = time_module.time()
@@ -57,6 +67,30 @@ def run_batch(json_file):
         
         clean_subject = topic
         category = "General"  # Default category
+        search_terms = []
+        
+        # Match pattern: Category_Number_Title
+        match = re.match(r'^([^_]+)_\d+_(.+)$', topic)
+        if match:
+            category, title_part = match.groups()
+            title_clean = title_part.replace('_', ' ')
+            clean_subject = f"{category} - {title_clean}"
+        else:
+            parts = topic.split('_')
+            if len(parts) > 1:
+                # Assume first part is category
+                category = parts[0]
+                clean_subject = topic.replace('_', ' ')
+            else:
+                clean_subject = topic
+
+        # Override category if provided via CLI
+        if category_arg:
+            category = category_arg
+
+        # DB: Insert Job
+        db.insert_job(task_id, clean_subject, category, status="processing")
+
         search_terms = []
         
         # Match pattern: Category_Number_Title
@@ -135,7 +169,7 @@ def run_batch(json_file):
         for attempt in range(1, max_retries + 1):
             attempts_used = attempt
             try:
-                task_id = str(uuid.uuid4())
+                # task_id = str(uuid.uuid4()) # Moved outside
                 logger.info(f"  > Attempt {attempt}/{max_retries}")
                 result = tm.start(task_id, params)
                 
@@ -145,12 +179,18 @@ def run_batch(json_file):
                         os.rename(output_file, final_output_path)
                         logger.success(f"Video saved to: {final_output_path}")
                         success = True
+                        
+                        # DB: Success
+                        db.update_job_status(task_id, "success", output_path=final_output_path, attempts=attempt)
                     
                     # Cleanup temp files for this task
                     cleanup.cleanup_task(task_id)
                     break 
                 else:
                     logger.error(f"Failed to generate video for: {topic} (attempt {attempt})")
+                    if attempt == max_retries:
+                         db.update_job_status(task_id, "failed", error_message="Max attempts reached", attempts=attempt)
+                    
                     cleanup.cleanup_task(task_id)  # Cleanup failed attempt
                     
                     if attempt < max_retries:
@@ -160,6 +200,9 @@ def run_batch(json_file):
                     
             except Exception as e:
                 logger.error(f"Error processing {topic} (attempt {attempt}): {str(e)}")
+                if attempt == max_retries:
+                     db.update_job_status(task_id, "failed", error_message=str(e), attempts=attempt)
+
                 cleanup.cleanup_task(task_id)  # Cleanup failed attempt
                 
                 if attempt < max_retries:
@@ -225,6 +268,8 @@ def _generate_report(results, batch_duration, category, base_dir):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Batch create videos from a JSON file.')
     parser.add_argument('json_file', help='Path to the JSON file containing topics')
+    parser.add_argument('--category', help='Force category name for outputs', default=None)
+    parser.add_argument('--delay', type=int, help='Delay in seconds before starting', default=0)
     args = parser.parse_args()
     
-    run_batch(args.json_file)
+    run_batch(args.json_file, category_arg=args.category, delay_seconds=args.delay)
