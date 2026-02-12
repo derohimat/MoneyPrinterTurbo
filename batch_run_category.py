@@ -18,6 +18,7 @@ from app.services import task as tm
 from app.config import config
 from app.utils import safety_filters
 from app.utils import bgm_matcher
+from app.utils import cleanup
 
 # VOICES
 VOICE_NAME = "en-US-ChristopherNeural"
@@ -144,9 +145,14 @@ def run_batch(json_file):
                         os.rename(output_file, final_output_path)
                         logger.success(f"Video saved to: {final_output_path}")
                         success = True
-                    break
+                    
+                    # Cleanup temp files for this task
+                    cleanup.cleanup_task(task_id)
+                    break 
                 else:
                     logger.error(f"Failed to generate video for: {topic} (attempt {attempt})")
+                    cleanup.cleanup_task(task_id)  # Cleanup failed attempt
+                    
                     if attempt < max_retries:
                         delay = retry_delays[attempt - 1]
                         logger.warning(f"Retrying in {delay}s...")
@@ -154,6 +160,8 @@ def run_batch(json_file):
                     
             except Exception as e:
                 logger.error(f"Error processing {topic} (attempt {attempt}): {str(e)}")
+                cleanup.cleanup_task(task_id)  # Cleanup failed attempt
+                
                 if attempt < max_retries:
                     delay = retry_delays[attempt - 1]
                     logger.warning(f"Retrying in {delay}s...")

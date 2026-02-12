@@ -11,7 +11,9 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
 from app.utils import utils
+from app.utils import utils
 from app.utils import video_scorer
+from app.utils import rate_limiter
 
 requested_count = 0
 
@@ -50,7 +52,10 @@ def search_videos_pexels(
     # Build URL
     params = {"query": search_term, "per_page": 20, "orientation": video_orientation}
     query_url = f"https://api.pexels.com/videos/search?{urlencode(params)}"
+    query_url = f"https://api.pexels.com/videos/search?{urlencode(params)}"
     logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
+
+    rate_limiter.pexels.wait()
 
     try:
         r = requests.get(
@@ -136,7 +141,10 @@ def search_videos_pixabay(
         "key": api_key,
     }
     query_url = f"https://pixabay.com/api/videos/?{urlencode(params)}"
+    query_url = f"https://pixabay.com/api/videos/?{urlencode(params)}"
     logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
+
+    rate_limiter.pixabay.wait()
 
     try:
         r = requests.get(
