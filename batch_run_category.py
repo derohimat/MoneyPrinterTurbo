@@ -1,15 +1,17 @@
-import sys
+"""
+Batch Video Generator — Category-based batch processing with progress reporting.
+Reads topics from a JSON file, generates videos, organizes by category, and produces a report.
+"""
+
+import argparse
 import os
 import re
-import uuid
 import sys
-import argparse
-from loguru import logger
+import uuid
+import time as time_module
+from datetime import datetime
 
-# Add root dir
-root_dir = os.path.dirname(os.path.realpath(__file__))
-if root_dir not in sys.path:
-    sys.path.append(root_dir)
+from loguru import logger
 
 from app.models.schema import VideoParams, VideoAspect, VideoConcatMode
 from app.services import task as tm
@@ -20,8 +22,10 @@ from app.utils import bgm_matcher
 # VOICES
 VOICE_NAME = "en-US-ChristopherNeural"
 
+root_dir = os.path.dirname(os.path.abspath(__file__))
+
+
 def run_batch(json_file):
-    # Enable debug logging
     logger.remove()
     logger.add(sys.stderr, level="DEBUG")
     
@@ -36,43 +40,41 @@ def run_batch(json_file):
 
     logger.info(f"Loaded {len(topics)} topics from {json_file}")
 
+    # Progress tracking
+    batch_start_time = time_module.time()
+    results = []  # list of dicts: {topic, status, duration, file_size, attempts}
+
     for i, topic in enumerate(topics):
         logger.info(f"Processing topic {i+1}/{len(topics)}: {topic}")
         
         task_id = str(uuid.uuid4())
+        topic_start = time_module.time()
 
         # Clean subject for AI generation
         # Input format: Category_01_Title_With_Underscores
-        # Output format: Category: Title With Underscores
+        # Output format: Category - Title With Spaces
         
         clean_subject = topic
-        category = "General" # Default category
+        category = "General"  # Default category
+        search_terms = []
         
         # Match pattern: Category_Number_Title
         match = re.match(r'^([^_]+)_\d+_(.+)$', topic)
         if match:
             category, title_part = match.groups()
-            # Replace remaining underscores in the title part with spaces
             title_clean = title_part.replace('_', ' ')
             clean_subject = f"{category} - {title_clean}"
         else:
-            # Fallback: just replace underscores
-            # Try to guess category if possible, or just use first word
             parts = topic.split('_')
             if len(parts) > 1:
                 category = parts[0]
-            
             clean_subject = topic.replace('_', ' ')
-            title_clean = clean_subject # For search term extraction fallback
+            title_clean = clean_subject
             
         logger.info(f"  > Subject for AI: {clean_subject}")
         
         # Extract search terms from title
-        # For "IslamicPlaces_01_Kabah_Mekkah_...", extract "Kabah Mekkah"
-        search_terms = []
         if "IslamicPlaces" in category:
-            # Take the first 2-3 words of the clean title as the main search term
-            # Example: "Kabah Mekkah Sejarah..." -> "Kabah Mekkah"
             words = title_clean.split()
             if len(words) >= 2:
                 main_term = f"{words[0]} {words[1]}"
@@ -81,13 +83,8 @@ def run_batch(json_file):
                 search_terms.append(f"{main_term} drone")
             else:
                 search_terms.append(title_clean)
-            
-            # Add general terms
             search_terms.append("Islamic Architecture")
             search_terms.append("Historical Place")
-            
-            logger.info(f"  > Forced Search Terms: {search_terms}")
-            
             logger.info(f"  > Forced Search Terms: {search_terms}")
             
         # Define negative terms using centralized safety logic
@@ -98,7 +95,6 @@ def run_batch(json_file):
         safe_name = re.sub(r'[\\/*?:"<>|]', "", topic)
         
         # Create category-specific directory
-        # e.g. batch_outputs/IslamicPlaces/
         batch_dir = os.path.join(root_dir, "batch_outputs", category)
         os.makedirs(batch_dir, exist_ok=True)
         
@@ -106,6 +102,8 @@ def run_batch(json_file):
         
         if os.path.exists(final_output_path):
             logger.warning(f"Skipping {topic} (File already exists: {final_output_path})")
+            file_size = os.path.getsize(final_output_path)
+            results.append({"topic": topic, "status": "skipped", "duration": 0, "file_size": file_size, "attempts": 0})
             continue
 
         # Get category-matched BGM
@@ -114,10 +112,10 @@ def run_batch(json_file):
         # Configure Video Params
         params = VideoParams(
             video_subject=clean_subject,
-            video_script="",  # Let AI generate script
-            video_terms=search_terms if search_terms else None, # Pass explicit terms if available
-            video_negative_terms=negative_terms if negative_terms else None, # Pass negative terms
-            video_aspect=VideoAspect.portrait.value, # 9:16
+            video_script="",
+            video_terms=search_terms if search_terms else None,
+            video_negative_terms=negative_terms if negative_terms else None,
+            video_aspect=VideoAspect.portrait.value,
             voice_name=VOICE_NAME,
             video_source="pexels",
             video_concat_mode=VideoConcatMode.random,
@@ -129,40 +127,92 @@ def run_batch(json_file):
         )
 
         max_retries = 3
-        retry_delays = [10, 30, 60]  # seconds between retries
+        retry_delays = [10, 30, 60]
+        success = False
+        attempts_used = 0
         
         for attempt in range(1, max_retries + 1):
+            attempts_used = attempt
             try:
-                task_id = str(uuid.uuid4())  # Fresh task_id per attempt
-                # Start generation
+                task_id = str(uuid.uuid4())
                 logger.info(f"  > Attempt {attempt}/{max_retries}")
                 result = tm.start(task_id, params)
                 
-                # If successful, rename output file
                 if result and "videos" in result:
                     output_file = result["videos"][0]
                     if os.path.exists(output_file):
                         os.rename(output_file, final_output_path)
                         logger.success(f"Video saved to: {final_output_path}")
-                    break  # Success, exit retry loop
+                        success = True
+                    break
                 else:
                     logger.error(f"Failed to generate video for: {topic} (attempt {attempt})")
                     if attempt < max_retries:
-                        import time
                         delay = retry_delays[attempt - 1]
                         logger.warning(f"Retrying in {delay}s...")
-                        time.sleep(delay)
+                        time_module.sleep(delay)
                     
             except Exception as e:
                 logger.error(f"Error processing {topic} (attempt {attempt}): {str(e)}")
                 if attempt < max_retries:
-                    import time
                     delay = retry_delays[attempt - 1]
                     logger.warning(f"Retrying in {delay}s...")
-                    time.sleep(delay)
+                    time_module.sleep(delay)
                 else:
                     logger.error(f"All {max_retries} attempts failed for: {topic}")
                 continue
+
+        topic_duration = time_module.time() - topic_start
+        file_size = os.path.getsize(final_output_path) if success and os.path.exists(final_output_path) else 0
+        results.append({
+            "topic": topic, 
+            "status": "success" if success else "failed", 
+            "duration": topic_duration, 
+            "file_size": file_size,
+            "attempts": attempts_used
+        })
+
+    # Generate batch report
+    batch_duration = time_module.time() - batch_start_time
+    _generate_report(results, batch_duration, category, root_dir)
+
+
+def _generate_report(results, batch_duration, category, base_dir):
+    """Generate a markdown progress report after batch completes."""
+    success_count = sum(1 for r in results if r["status"] == "success")
+    failed_count = sum(1 for r in results if r["status"] == "failed")
+    skipped_count = sum(1 for r in results if r["status"] == "skipped")
+    total_size = sum(r["file_size"] for r in results)
+    
+    report_dir = os.path.join(base_dir, "batch_outputs", category)
+    os.makedirs(report_dir, exist_ok=True)
+    report_path = os.path.join(report_dir, "batch_report.md")
+    
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(f"# Batch Report — {category}\n\n")
+        f.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write(f"## Summary\n")
+        f.write(f"| Metric | Value |\n")
+        f.write(f"|--------|-------|\n")
+        f.write(f"| Total Topics | {len(results)} |\n")
+        f.write(f"| ✅ Success | {success_count} |\n")
+        f.write(f"| ❌ Failed | {failed_count} |\n")
+        f.write(f"| ⏭️ Skipped | {skipped_count} |\n")
+        f.write(f"| ⏱️ Total Time | {batch_duration/60:.1f} minutes |\n")
+        f.write(f"| 💾 Total Size | {total_size / (1024*1024):.1f} MB |\n\n")
+        
+        f.write(f"## Details\n\n")
+        f.write(f"| # | Topic | Status | Time | Size | Attempts |\n")
+        f.write(f"|---|-------|--------|------|------|----------|\n")
+        for i, r in enumerate(results, 1):
+            status_icon = "✅" if r["status"] == "success" else "❌" if r["status"] == "failed" else "⏭️"
+            time_str = f"{r['duration']:.0f}s" if r["duration"] > 0 else "-"
+            size_str = f"{r['file_size']/(1024*1024):.1f}MB" if r["file_size"] > 0 else "-"
+            attempts_str = str(r["attempts"]) if r["attempts"] > 0 else "-"
+            f.write(f"| {i} | {r['topic'][:50]} | {status_icon} {r['status']} | {time_str} | {size_str} | {attempts_str} |\n")
+    
+    logger.success(f"Batch report saved to: {report_path}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Batch create videos from a JSON file.')
