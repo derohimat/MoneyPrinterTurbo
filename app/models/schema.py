@@ -106,6 +106,12 @@ class VideoParams(BaseModel):
     n_threads: Optional[int] = 2
     paragraph_number: Optional[int] = 1
 
+    # Watermark settings
+    watermark_text: Optional[str] = ""  # e.g. "@YourChannel"
+    watermark_image: Optional[str] = ""  # Path to logo PNG
+    watermark_position: Optional[str] = "bottom_right"  # top_left, top_right, bottom_left, bottom_right, center
+    watermark_opacity: Optional[float] = 0.7  # 0.0 to 1.0
+
 
 class SubtitleRequest(BaseModel):
     video_script: str

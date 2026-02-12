@@ -15,6 +15,7 @@ from moviepy import (
     TextClip,
     VideoFileClip,
     afx,
+    vfx,
     concatenate_videoclips,
 )
 from moviepy.video.tools.subtitles import SubtitlesClip
@@ -474,6 +475,46 @@ def generate_video(
             logger.error(f"failed to add bgm: {str(e)}")
 
     video_clip = video_clip.with_audio(audio_clip)
+
+    # Watermark overlay
+    watermark_clip = None
+    if params.watermark_text:
+        logger.info(f"  ⑥ watermark text: {params.watermark_text}")
+        wm_font = font_path if font_path else "Arial"
+        watermark_clip = TextClip(
+            text=params.watermark_text,
+            font=wm_font,
+            font_size=max(24, int(params.font_size * 0.4)),
+            color="#FFFFFF",
+        ).with_effects([vfx.CrossFadeIn(0)])
+        watermark_clip = watermark_clip.with_duration(video_clip.duration)
+        watermark_clip = watermark_clip.with_opacity(params.watermark_opacity)
+    elif params.watermark_image and os.path.exists(params.watermark_image):
+        logger.info(f"  ⑥ watermark image: {params.watermark_image}")
+        watermark_clip = ImageClip(params.watermark_image)
+        # Scale watermark to max 15% of video width
+        wm_scale = (video_width * 0.15) / watermark_clip.w
+        watermark_clip = watermark_clip.resized(wm_scale)
+        watermark_clip = watermark_clip.with_duration(video_clip.duration)
+        watermark_clip = watermark_clip.with_opacity(params.watermark_opacity)
+
+    if watermark_clip:
+        margin = 20
+        pos = params.watermark_position or "bottom_right"
+        if pos == "top_left":
+            wm_pos = (margin, margin)
+        elif pos == "top_right":
+            wm_pos = (video_width - watermark_clip.w - margin, margin)
+        elif pos == "bottom_left":
+            wm_pos = (margin, video_height - watermark_clip.h - margin)
+        elif pos == "center":
+            wm_pos = ("center", "center")
+        else:  # bottom_right (default)
+            wm_pos = (video_width - watermark_clip.w - margin, video_height - watermark_clip.h - margin)
+
+        watermark_clip = watermark_clip.with_position(wm_pos)
+        video_clip = CompositeVideoClip([video_clip, watermark_clip])
+
     video_clip.write_videofile(
         output_file,
         audio_codec=audio_codec,
