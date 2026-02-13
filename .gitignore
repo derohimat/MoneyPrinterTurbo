@@ -26,6 +26,7 @@ node_modules
 
 venv/
 .venv
+venv-upload/
 
 # Debug and test files
 CLAUDE.md
