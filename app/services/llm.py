@@ -336,6 +336,50 @@ def _generate_response(prompt: str) -> str:
         return f"Error: {str(e)}"
 
 
+def generate_viral_topic(category: str = "") -> str:
+    """Generate a viral video topic using the LLM."""
+    prompt = f"""
+# Role: Viral Content Strategist
+
+## Goal:
+Generate ONE single specific, viral-worthy short video topic.
+
+## Constraints:
+1. Return ONLY the topic text. No quotes, no explanations, no "Here is a topic:".
+2. The topic must be catchy, intriguing, and suitable for a short video (Shorts/Reels/TikTok).
+3. If a category is provided, the topic must belong to that category.
+4. If no category is provided, choose a random popular niche (Mystery, Facts, History, Science, Psychology, Finance, etc.).
+5. The topic should be in English.
+6. Make it sound like a hook or a title.
+
+## Input:
+Category: {category if category else "Random Mixed"}
+
+## Example Outputs:
+- The Dark Secret Behind the Mona Lisa's Smile
+- Why You Should Never Sleep with Your Phone
+- The Man Who Survived Two Nuclear Bombs
+- 3 Money Hacks Banks Don't Want You to Know
+""".strip()
+
+    for i in range(_max_retries):
+        try:
+            response = _generate_response(prompt=prompt)
+            if response:
+                # Clean up response
+                topic = response.strip().strip('"').strip("'")
+                # Remove prefixes like "Topic: " or "1. "
+                topic = re.sub(r"^(Topic:|Here is a topic:|1\.|-)\s*", "", topic, flags=re.IGNORECASE)
+                return topic
+        except Exception as e:
+            logger.error(f"failed to generate viral topic: {e}")
+        
+        if i < _max_retries:
+            time.sleep(1)
+            
+    return "The Mystery of Why This Topic Failed to Load"
+
+
 def generate_script(
     video_subject: str, language: str = "", paragraph_number: int = 1
 ) -> str:
