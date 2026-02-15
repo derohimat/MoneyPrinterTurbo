@@ -247,8 +247,8 @@ def combine_videos(
     # merge video clips progressively, avoid loading all videos at once to avoid memory overflow
     logger.info("starting clip merging process")
     if not processed_clips:
-        logger.warning("no clips available for merging")
-        return combined_video_path
+        logger.error("no clips available for merging")
+        raise ValueError("No valid video clips were processed successfully. Check if download failed or files are corrupted.")
     
     # if there is only one clip, use it directly
     if len(processed_clips) == 1:

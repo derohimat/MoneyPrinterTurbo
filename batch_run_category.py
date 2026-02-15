@@ -174,7 +174,7 @@ def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False
         )
 
         max_retries = 3
-        retry_delays = [10, 30, 60]
+        retry_delays = [60, 120, 300]
         success = False
         attempts_used = 0
         

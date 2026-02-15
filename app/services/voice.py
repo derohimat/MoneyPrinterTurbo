@@ -1204,20 +1204,46 @@ def azure_tts_v1(
             logger.info(f"start, voice name: {voice_name}, try: {i + 1}")
 
             async def _do() -> SubMaker:
-                communicate = edge_tts.Communicate(text, voice_name, rate=rate_str, boundary="WordBoundary")
+                communicate = edge_tts.Communicate(text, voice_name, rate=rate_str)
                 sub_maker = SubMaker() # Use local SubMaker
                 with open(voice_file, "wb") as file:
-                    async for chunk in communicate.stream():
-                        if chunk["type"] == "audio":
-                            file.write(chunk["data"])
-                        elif chunk["type"] == "WordBoundary":
-                            sub_maker.create_sub(
-                                (chunk["offset"], chunk["duration"]), chunk["text"]
-                            )
+                    try:
+                        async for chunk in communicate.stream():
+                            if chunk["type"] == "audio":
+                                file.write(chunk["data"])
+                            elif chunk["type"] == "WordBoundary":
+                                sub_maker.create_sub(
+                                    (chunk["offset"], chunk["duration"]), chunk["text"]
+                                )
+                    except Exception as stream_e:
+                        logger.error(f"Error during edge-tts stream: {stream_e}")
+                        raise stream_e
                 return sub_maker
 
             sub_maker = asyncio.run(_do())
+            if sub_maker:
+                logger.debug(f"SubMaker subs count: {len(sub_maker.subs)}")
+            
             if not sub_maker or not sub_maker.subs:
+                if os.path.exists(voice_file) and os.path.getsize(voice_file) > 0:
+                    logger.warning("sub_maker is empty but audio file exists, falling back to full duration subtitle")
+                    try:
+                        from moviepy import AudioFileClip
+                        audio_clip = AudioFileClip(voice_file)
+                        audio_duration = audio_clip.duration
+                        audio_clip.close()
+                        audio_duration_100ns = int(audio_duration * 10000000)
+                        
+                        if not sub_maker:
+                            sub_maker = SubMaker()
+                        
+                        sub_maker.subs.append(text)
+                        sub_maker.offset.append((0, audio_duration_100ns))
+                        logger.info(f"created fallback subtitle for {voice_file}, duration: {audio_duration}s")
+                        return sub_maker
+                    except Exception as e:
+                        logger.error(f"failed to create fallback subtitle: {str(e)}")
+                
                 logger.warning("failed, sub_maker is None or sub_maker.subs is None")
                 continue
 
