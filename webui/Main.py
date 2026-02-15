@@ -25,7 +25,10 @@ from app.models.schema import (
 )
 from app.services import llm, voice
 from app.services import task as tm
+from app.services import state as sm
 from app.utils import utils
+import threading
+import time
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
@@ -41,6 +44,51 @@ st.set_page_config(
     },
 )
 
+
+
+# --- Task History Section ---
+with st.expander("📜 Task History & Progress", expanded=True):
+    if st.button("🔄 Refresh History"):
+        st.rerun()
+        
+    tasks, total = sm.state.get_all_tasks(page=1, page_size=10)
+    if not tasks:
+        st.info("No tasks found.")
+    else:
+        for task in tasks:
+            task_id = task.get("task_id")
+            state = task.get("state")
+            progress = task.get("progress", 0)
+            subject = task.get("video_subject", "Unknown Subject")
+            
+            col1, col2, col3 = st.columns([3, 2, 2])
+            with col1:
+                st.write(f"**{subject}**")
+                st.caption(f"ID: `{task_id[:8]}...`")
+            with col2:
+                if state == 4: # PROCESSING
+                    st.progress(progress / 100, text=f"Processing: {int(progress)}%")
+                elif state == 1: # COMPLETE
+                    st.success("✅ Completed")
+                elif state == -1: # FAILED
+                    st.error("❌ Failed")
+                else:
+                    st.write(f"State: {state}")
+            with col3:
+                if state == 1 and "videos" in task:
+                    video_url = task["videos"][0]
+                    if os.path.exists(video_url):
+                        st.video(video_url)
+                    else:
+                        st.warning("File not found")
+
+    # Auto-refresh if any task is running
+    p_tasks, _ = sm.state.get_all_tasks(1, 100)
+    if any(t.get("state") == 4 for t in p_tasks):
+        time.sleep(2)
+        st.rerun()
+
+st.divider()
 
 streamlit_style = """
 <style>
@@ -1042,42 +1090,25 @@ if start_button:
                     params.video_materials = []
                 params.video_materials.append(m)
 
-    log_container = st.empty()
-    log_records = []
+    # Initialize task state
+    sm.state.update_task(task_id, state=4, progress=0, video_subject=params.video_subject) # 4=PROCESSING
 
-    def log_received(msg):
-        if config.ui["hide_log"]:
-            return
-        with log_container:
-            log_records.append(msg)
-            st.code("\n".join(log_records))
+    # Start background thread
+    def run_task():
+        try:
+            tm.start(task_id=task_id, params=params)
+        except Exception as e:
+            logger.error(f"Task {task_id} failed: {e}")
+            sm.state.update_task(task_id, state=-1)
 
-    logger.add(log_received)
+    thread = threading.Thread(target=run_task)
+    thread.start()
 
-    st.toast(tr("Generating Video"))
-    logger.info(tr("Start Generating Video"))
-    logger.info(utils.to_json(params))
-    scroll_to_bottom()
-
-    result = tm.start(task_id=task_id, params=params)
-    if not result or "videos" not in result:
-        st.error(tr("Video Generation Failed"))
-        logger.error(tr("Video Generation Failed"))
-        scroll_to_bottom()
-        st.stop()
-
-    video_files = result.get("videos", [])
-    st.success(tr("Video Generation Completed"))
-    try:
-        if video_files:
-            player_cols = st.columns(len(video_files) * 2 + 1)
-            for i, url in enumerate(video_files):
-                player_cols[i * 2 + 1].video(url)
-    except Exception:
-        pass
-
-    open_task_folder(task_id)
-    logger.info(tr("Video Generation Completed"))
-    scroll_to_bottom()
+    st.toast(f"🚀 Tasks Started! ID: {task_id}", icon="🚀")
+    st.success(f"**Task Started!**\n\nThe video is generating in the background.\nYou can check progress in the **Task History** section above.")
+    st.info("You can now navigate to other pages or close this tab. The process will continue.")
+    
+    time.sleep(1)
+    st.rerun()
 
 config.save_config()

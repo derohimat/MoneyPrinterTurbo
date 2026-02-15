@@ -20,6 +20,7 @@ class BaseState(ABC):
         pass
 
 
+
 # Memory state management
 class MemoryState(BaseState):
     def __init__(self):
@@ -56,6 +57,85 @@ class MemoryState(BaseState):
     def delete_task(self, task_id: str):
         if task_id in self._tasks:
             del self._tasks[task_id]
+
+
+# File state management (JSON)
+class FileState(BaseState):
+    def __init__(self):
+        import json
+        import os
+        from app.utils import utils
+        
+        self._file_path = os.path.join(utils.storage_dir(), "tasks.json")
+        self._tasks = {}
+        self._load()
+
+    def _load(self):
+        import json
+        import os
+        if os.path.exists(self._file_path):
+            try:
+                with open(self._file_path, "r", encoding="utf-8") as f:
+                    self._tasks = json.load(f)
+            except Exception:
+                self._tasks = {}
+        else:
+            self._tasks = {}
+
+    def _save(self):
+        import json
+        try:
+            with open(self._file_path, "w", encoding="utf-8") as f:
+                json.dump(self._tasks, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def get_all_tasks(self, page: int, page_size: int):
+        # Sort by creation time if possible, or just reverse order (provisional)
+        tasks = list(self._tasks.values())
+        # Ideally sort by task_id (uuid, mostly random) or add timestamp. 
+        # For simplicity, just reverse list to show newest on top (assuming python dict order ~ creation order)
+        tasks.reverse()
+        
+        start = (page - 1) * page_size
+        end = start + page_size
+        total = len(tasks)
+        return tasks[start:end], total
+
+    def update_task(
+        self,
+        task_id: str,
+        state: int = const.TASK_STATE_PROCESSING,
+        progress: int = 0,
+        **kwargs,
+    ):
+        progress = int(progress)
+        if progress > 100:
+            progress = 100
+
+        task_data = self._tasks.get(task_id, {})
+        task_data.update({
+            "task_id": task_id,
+            "state": state,
+            "progress": progress,
+            **kwargs,
+        })
+        # Add timestamp if new
+        import time
+        if "created_at" not in task_data:
+            task_data["created_at"] = time.time()
+            
+        self._tasks[task_id] = task_data
+        self._save()
+
+    def get_task(self, task_id: str):
+        return self._tasks.get(task_id, None)
+
+    def delete_task(self, task_id: str):
+        if task_id in self._tasks:
+            del self._tasks[task_id]
+            self._save()
+
 
 
 # Redis state management
@@ -154,5 +234,5 @@ state = (
         host=_redis_host, port=_redis_port, db=_redis_db, password=_redis_password
     )
     if _enable_redis
-    else MemoryState()
+    else FileState()
 )
