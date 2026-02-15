@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import time
 import requests
 from typing import List
 
@@ -74,6 +75,12 @@ def _generate_response(prompt: str) -> str:
                 base_url = config.app.get("deepseek_base_url")
                 if not base_url:
                     base_url = "https://api.deepseek.com"
+            elif llm_provider == "sumopod":
+                api_key = config.app.get("sumopod_api_key")
+                model_name = config.app.get("sumopod_model_name")
+                base_url = config.app.get("sumopod_base_url", "")
+                if not base_url:
+                    base_url = "https://ai.sumopod.com/v1"
             elif llm_provider == "modelscope":
                 api_key = config.app.get("modelscope_api_key")
                 model_name = config.app.get("modelscope_model_name")
@@ -305,6 +312,7 @@ def _generate_response(prompt: str) -> str:
                 client = OpenAI(
                     api_key=api_key,
                     base_url=base_url,
+                    timeout=60.0,
                 )
 
             response = client.chat.completions.create(
@@ -346,6 +354,7 @@ Generate a script for a video, depending on the subject of the video.
 6. do not include "voiceover", "narrator" or similar indicators of what should be spoken at the beginning of each paragraph or line.
 7. you must not mention the prompt, or anything about the script itself. also, never talk about the amount of paragraphs or lines. just write the script.
 8. respond in the same language as the video subject.
+9. IMPORTANT: All content must be safe and appropriate for children under 10 years old. Do not include any violence, horror, sexual content, drugs, alcohol, profanity, gambling, weapons, or any disturbing or inappropriate themes. Keep the tone positive, educational, and family-friendly.
 
 # Initialization:
 - video subject: {video_subject}
@@ -395,6 +404,7 @@ Generate a script for a video, depending on the subject of the video.
 
         if i < _max_retries:
             logger.warning(f"failed to generate video script, trying again... {i + 1}")
+            time.sleep(2 * (i + 1))  # exponential backoff
     if "Error: " in final_script:
         logger.error(f"failed to generate video script: {final_script}")
     else:
@@ -415,6 +425,7 @@ Generate {amount} search terms for stock videos, depending on the subject of a v
 3. you must only return the json-array of strings. you must not return anything else. you must not return the script.
 4. the search terms must be related to the subject of the video.
 5. reply with english search terms only.
+6. IMPORTANT: All search terms must be safe and appropriate for children. Do not generate terms related to violence, horror, weapons, sexual content, drugs, alcohol, gambling, or anything inappropriate for children under 10.
 
 ## Output Example:
 ["search term 1", "search term 2", "search term 3","search term 4","search term 5"]
@@ -461,6 +472,7 @@ Please note that you must use English for generating video search terms; Chinese
             break
         if i < _max_retries:
             logger.warning(f"failed to generate video terms, trying again... {i + 1}")
+            time.sleep(2 * (i + 1))  # exponential backoff
 
     logger.success(f"completed: \n{search_terms}")
     return search_terms

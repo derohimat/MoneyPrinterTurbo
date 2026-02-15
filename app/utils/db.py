@@ -108,3 +108,54 @@ def get_job_by_topic(topic):
         logger.error(f"DB Fetch Error: {e}")
         return None
 
+
+def get_retryable_jobs(category=None):
+    """Get jobs with status 'failed' or 'processing' (stuck) that can be retried."""
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        if category:
+            c.execute(
+                "SELECT * FROM jobs WHERE status IN ('failed', 'processing') AND category = ? ORDER BY created_at",
+                (category,)
+            )
+        else:
+            c.execute(
+                "SELECT * FROM jobs WHERE status IN ('failed', 'processing') ORDER BY created_at"
+            )
+        rows = c.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error(f"DB Fetch Retryable Error: {e}")
+        return []
+
+
+def reset_job_for_retry(job_id):
+    """Reset a failed/stuck job so it can be retried."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("""
+            UPDATE jobs SET status = 'pending', error_message = NULL, 
+            attempts = 0, updated_at = ? WHERE id = ?
+        """, (datetime.now(), job_id))
+        conn.commit()
+        conn.close()
+        logger.info(f"Job {job_id} reset for retry")
+    except Exception as e:
+        logger.error(f"DB Reset Error: {e}")
+
+
+def delete_job(job_id):
+    """Delete a job from the database."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        conn.commit()
+        conn.close()
+        logger.info(f"Job {job_id} deleted")
+    except Exception as e:
+        logger.error(f"DB Delete Error: {e}")

@@ -1,14 +1,30 @@
 import logging
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 logger = logging.getLogger(__name__)
 
 # Global negative terms (Safe for work/Kids friendly)
 GLOBAL_NEGATIVE_TERMS = [
-    "nude", "sex", "porn", "bikini", "underwear", "lingerie", "naked", 
-    "violence", "blood", "gore", "kill", "murder", "death", "dead", 
-    "drug", "cocaine", "heroine", "weed", "smoking", "cigarette", "alcohol", "liquor", "beer", "wine", "drunk",
-    "horror", "scary", "ghost", "zombie", "monster", "witch", "demon", "devil", "satan", "hell" # Default exclude horror unless specified
+    # Sexual / Adult content
+    "nude", "sex", "porn", "bikini", "underwear", "lingerie", "naked",
+    "sexy", "seductive", "erotic", "adult", "mature", "strip", "escort",
+    "prostitute", "harem", "fetish", "bondage",
+    # Violence
+    "violence", "blood", "gore", "kill", "murder", "death", "dead",
+    "gun", "rifle", "sword", "knife", "weapon", "war", "fight", "battle",
+    "shoot", "assault", "abuse", "torture", "execution", "slaughter",
+    # Drugs / Alcohol / Smoking
+    "drug", "cocaine", "heroine", "weed", "smoking", "cigarette",
+    "alcohol", "liquor", "beer", "wine", "drunk", "marijuana", "opium",
+    "meth", "overdose", "injection", "syringe",
+    # Horror / Disturbing
+    "horror", "scary", "ghost", "zombie", "monster", "witch", "demon",
+    "devil", "satan", "hell", "nightmare", "creepy", "haunted",
+    "skull", "skeleton", "coffin", "grave", "cemetery",
+    # Gambling
+    "gambling", "casino", "betting", "slot machine", "poker",
+    # Profanity / Anger
+    "angry", "rage", "scream", "hate", "curse", "swear",
 ]
 
 # Category specific negative terms
@@ -40,6 +56,14 @@ CATEGORY_NEGATIVE_TERMS: Dict[str, List[str]] = {
         "poverty", "homeless", "beggar", "trash", "dirty", "gambling", "casino", "slot machine", "betting"
     ]
 }
+
+# Unsafe words to check in generated scripts (post-generation validation)
+SCRIPT_UNSAFE_WORDS = [
+    "kill", "murder", "blood", "sex", "porn", "nude", "naked", "drug",
+    "cocaine", "gun", "shoot", "rape", "suicide", "terrorist", "bomb",
+    "torture", "abuse", "prostitut", "gambling", "drunk",
+]
+
 
 def get_negative_terms(subject: str, category_hint: str = None) -> List[str]:
     """
@@ -79,3 +103,21 @@ def get_negative_terms(subject: str, category_hint: str = None) -> List[str]:
         negative_terms.extend(CATEGORY_NEGATIVE_TERMS[detected_category])
     
     return negative_terms
+
+
+def validate_script_safety(script: str) -> Tuple[bool, List[str]]:
+    """
+    Post-generation safety check for generated scripts.
+    Returns (is_safe, list_of_flagged_words).
+    """
+    if not script:
+        return True, []
+
+    script_lower = script.lower()
+    flagged = []
+    for word in SCRIPT_UNSAFE_WORDS:
+        if word in script_lower:
+            flagged.append(word)
+
+    return len(flagged) == 0, flagged
+
