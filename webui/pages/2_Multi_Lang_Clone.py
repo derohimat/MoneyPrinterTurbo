@@ -2,7 +2,7 @@ import streamlit as st
 import subprocess
 import sys
 import os
-import time
+import json
 
 # Add root to sys.path
 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,25 +32,113 @@ LANGUAGE_PRESETS = {
     "ms": ("ms-MY-OsmanNeural", "🇲🇾 Malay"),
 }
 
-# --- Input Section ---
+# --- Video Source Selection (like Upload page) ---
 with st.container(border=True):
-    st.subheader("📝 Video Configuration")
+    st.subheader("📹 Select Source Video / Topic")
     
-    col1, col2 = st.columns([2, 1])
+    select_mode = st.radio(
+        "Source Mode",
+        ["Browse batch_outputs", "Browse task files (JSON)", "Manual input"],
+        horizontal=True,
+        key="mlc_source_mode"
+    )
     
-    with col1:
-        video_subject = st.text_input(
-            "Video Subject / Topic",
-            placeholder="e.g. Mystery - Bermuda Triangle Mystery Solved Or Not",
-            help="The topic that will be used to generate video content in each language"
-        )
+    video_subject = ""
+    category = "General"
     
-    with col2:
-        category = st.text_input(
-            "Category",
-            value="General",
-            help="Category folder name for organizing outputs"
-        )
+    if select_mode == "Browse batch_outputs":
+        batch_dir = os.path.join(root_dir, "batch_outputs")
+        
+        if os.path.exists(batch_dir):
+            categories = sorted([d for d in os.listdir(batch_dir) 
+                                if os.path.isdir(os.path.join(batch_dir, d))])
+            
+            if categories:
+                category = st.selectbox("Category", categories, key="mlc_cat")
+                cat_path = os.path.join(batch_dir, category)
+                
+                # Find all mp4 files
+                videos = []
+                for rp, dirs, files in os.walk(cat_path):
+                    for f in files:
+                        if f.endswith(".mp4"):
+                            full_path = os.path.join(rp, f)
+                            rel_path = os.path.relpath(full_path, cat_path)
+                            name = os.path.splitext(f)[0]
+                            size_mb = os.path.getsize(full_path) / (1024 * 1024)
+                            videos.append((name, rel_path, full_path, size_mb))
+                
+                if videos:
+                    video_options = [f"{v[0]} ({v[3]:.1f} MB)" for v in videos]
+                    selected_idx = st.selectbox(
+                        "Select Video to Clone",
+                        range(len(videos)),
+                        format_func=lambda x: video_options[x],
+                        key="mlc_video_select"
+                    )
+                    video_subject = videos[selected_idx][0]
+                    
+                    # Preview
+                    if videos[selected_idx][2] and os.path.exists(videos[selected_idx][2]):
+                        with st.expander("🎬 Preview", expanded=False):
+                            st.video(videos[selected_idx][2])
+                    
+                    st.success(f"📝 Subject: **{video_subject}**")
+                else:
+                    st.info("No .mp4 files found in this category.")
+            else:
+                st.info("No category folders found in batch_outputs.")
+        else:
+            st.warning("batch_outputs directory not found.")
+    
+    elif select_mode == "Browse task files (JSON)":
+        # Find all JSON task files
+        json_files = [f for f in os.listdir(root_dir) if f.startswith("tasks_") and f.endswith(".json")]
+        
+        if json_files:
+            selected_json = st.selectbox("Task File", sorted(json_files), key="mlc_json_file")
+            
+            try:
+                with open(os.path.join(root_dir, selected_json), "r", encoding="utf-8") as f:
+                    topics = json.load(f)
+                
+                if topics:
+                    topic_options = [t.get("topic", t.get("subject", str(t))) if isinstance(t, dict) else str(t) 
+                                   for t in topics]
+                    selected_topic_idx = st.selectbox(
+                        "Select Topic",
+                        range(len(topic_options)),
+                        format_func=lambda x: topic_options[x],
+                        key="mlc_topic_select"
+                    )
+                    video_subject = topic_options[selected_topic_idx]
+                    
+                    # Extract category from filename (tasks_misteri.json -> Misteri)
+                    cat_name = selected_json.replace("tasks_", "").replace(".json", "").capitalize()
+                    category = cat_name
+                    
+                    st.success(f"📝 Subject: **{video_subject}** | Category: **{category}**")
+                else:
+                    st.info("No topics found in selected file.")
+            except Exception as e:
+                st.error(f"Error reading JSON: {str(e)}")
+        else:
+            st.info("No tasks_*.json files found in project root.")
+    
+    else:  # Manual input
+        col_m1, col_m2 = st.columns([2, 1])
+        with col_m1:
+            video_subject = st.text_input(
+                "Video Subject / Topic",
+                placeholder="e.g. Mystery - Bermuda Triangle Mystery Solved Or Not",
+                help="The topic that will be used to generate video content in each language"
+            )
+        with col_m2:
+            category = st.text_input(
+                "Category",
+                value="General",
+                help="Category folder name for organizing outputs"
+            )
 
 # --- Language Selection ---
 with st.container(border=True):
@@ -148,19 +236,19 @@ st.subheader("📂 Generated Outputs")
 
 multilang_dir = os.path.join(root_dir, "batch_outputs", "multilang")
 if os.path.exists(multilang_dir):
-    categories = [d for d in os.listdir(multilang_dir) if os.path.isdir(os.path.join(multilang_dir, d))]
+    categories_out = [d for d in os.listdir(multilang_dir) if os.path.isdir(os.path.join(multilang_dir, d))]
     
-    if categories:
-        selected_cat = st.selectbox("Select Category", categories)
+    if categories_out:
+        selected_cat = st.selectbox("Select Category", categories_out, key="mlc_out_cat")
         cat_dir = os.path.join(multilang_dir, selected_cat)
         
         if os.path.exists(cat_dir):
             lang_dirs = [d for d in os.listdir(cat_dir) if os.path.isdir(os.path.join(cat_dir, d))]
             
             if lang_dirs:
-                lang_cols = st.columns(min(len(lang_dirs), 4))
+                out_lang_cols = st.columns(min(len(lang_dirs), 4))
                 for i, lang_code in enumerate(sorted(lang_dirs)):
-                    col = lang_cols[i % len(lang_cols)]
+                    col = out_lang_cols[i % len(out_lang_cols)]
                     lang_path = os.path.join(cat_dir, lang_code)
                     videos = [f for f in os.listdir(lang_path) if f.endswith(".mp4")]
                     
@@ -168,7 +256,7 @@ if os.path.exists(multilang_dir):
                         label = LANGUAGE_PRESETS.get(lang_code, ("", lang_code))[1]
                         st.write(f"**{label}**")
                         st.metric("Videos", len(videos))
-                        for v in videos[:3]:  # Show first 3
+                        for v in videos[:3]:
                             st.caption(f"📹 {v[:40]}...")
             else:
                 st.info("No language folders found in this category yet.")
