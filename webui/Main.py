@@ -1,5 +1,6 @@
 import os
 import platform
+import random
 import sys
 from uuid import uuid4
 
@@ -488,6 +489,69 @@ right_panel = panel[2]
 params = VideoParams(video_subject="")
 uploaded_files = []
 
+# Curated trending topic suggestions for "I'm Feeling Lucky"
+_LUCKY_TOPICS = [
+    # Mystery
+    "The Bermuda Triangle - Ships That Vanished Without a Trace",
+    "The Lost City of Atlantis - Hidden Beneath the Ocean",
+    "Area 51 - What the Government Doesn't Want You to Know",
+    "The Voynich Manuscript - A Book Nobody Can Read",
+    "The Dyatlov Pass Incident - 9 Hikers Who Never Returned",
+    "The Mary Celeste - A Ghost Ship Found With No Crew",
+    "The Zodiac Killer - America's Most Mysterious Serial Killer",
+    "The Wow Signal - Did Aliens Contact Us in 1977",
+    # Psychology
+    "Why Your Brain Lies to You Every Day - Cognitive Biases Explained",
+    "The Dark Psychology of Manipulation - 5 Techniques to Watch For",
+    "Why Silence Makes People Uncomfortable - The Psychology of Quiet",
+    "The Dunning-Kruger Effect - Why Stupid People Think They're Smart",
+    "The Psychology Behind Why You Procrastinate",
+    "Mirror Neurons - Why We Feel What Others Feel",
+    # Facts
+    "10 Countries That Will Disappear by 2100",
+    "Why the Ocean Is Still 80 Percent Unexplored",
+    "The Richest Person Who Ever Lived - Mansa Musa's $400 Billion Fortune",
+    "Why We Still Can't Cure the Common Cold",
+    "5 Inventions That Changed the World by Accident",
+    "What Happens to Your Body After You Die",
+    # Finance
+    "The Rule of 72 - Double Your Money Using Simple Math",
+    "Why the Rich Don't Work for Money - Robert Kiyosaki's Secret",
+    "5 Money Habits That Keep You Poor Forever",
+    "Compound Interest - The 8th Wonder of the World",
+    "The Latte Factor - How Small Spending Ruins Your Wealth",
+    # Health
+    "What Happens When You Stop Eating Sugar for 30 Days",
+    "The Science of Sleep - Why 8 Hours Isn't Always Enough",
+    "Cold Showers vs Hot Showers - Which Is Actually Better",
+    "Intermittent Fasting - What Science Actually Says",
+    "Why Walking 10000 Steps a Day Changed Everything",
+    # History
+    "The Fall of the Roman Empire - What Really Happened",
+    "Nikola Tesla - The Genius Who Died Broke and Alone",
+    "Cleopatra - The Last Pharaoh Who Spoke 9 Languages",
+    "The Titanic - Things They Don't Teach You in School",
+    # Science
+    "What Would Happen If Earth Stopped Spinning",
+    "Black Holes Explained - What Happens Inside Them",
+    "Quantum Physics for Beginners - Reality Is Not What You Think",
+    "Why Time Moves Slower in Space - Einstein Was Right",
+    # Islamic
+    "The Miracle of the Kaaba - 7 Facts That Will Amaze You",
+    "The Golden Age of Islam - When Muslims Led the World in Science",
+    "Masjid Al-Aqsa - The Third Holiest Site in Islam",
+    "The Story of Prophet Yusuf - The Most Beautiful Story Ever Told",
+    # Horror
+    "The Winchester Mystery House - Built for Ghosts",
+    "Aokigahara Forest - Japan's Haunted Suicide Forest",
+    "The Conjuring House - Real Events Behind the Movie",
+    # Motivation / Stoic
+    "Marcus Aurelius - The Most Powerful Man Who Chose Simplicity",
+    "The Art of Not Caring - Stoic Wisdom for Modern Life",
+    "Why Comfort Is Killing Your Potential - A Stoic Perspective",
+    "Epictetus - From Slave to Greatest Philosopher",
+]
+
 with left_panel:
     with st.container(border=True):
         st.write(tr("Video Script Settings"))
@@ -496,6 +560,11 @@ with left_panel:
             value=st.session_state["video_subject"],
             key="video_subject_input",
         ).strip()
+
+        if st.button("🍀 I'm Feeling Lucky", key="feeling_lucky", use_container_width=True):
+            lucky_topic = random.choice(_LUCKY_TOPICS)
+            st.session_state["video_subject"] = lucky_topic
+            st.rerun()
 
         video_languages = [
             (tr("Auto Detect"), ""),
