@@ -1,0 +1,98 @@
+2026-02-15 23:15:38,845 - INFO - Thread started for task 19c91402-78c1-46a6-84be-abd0994e9837
+2026-02-15 23:15:38,845 - INFO - Params video_subject: The One Thing You Can't Do in Your Dreams
+2026-02-15 23:15:38,845 - INFO - Params video_script length: 716
+2026-02-15 23:15:38,853 - DEBUG - Using selector: SelectSelector
+2026-02-15 23:15:51,405 - DEBUG - connect_tcp.started host='huggingface.co' port=443 local_address=None timeout=None socket_options=None
+2026-02-15 23:15:51,482 - DEBUG - connect_tcp.complete return_value=<httpcore._backends.sync.SyncStream object at 0x000001E909B904D0>
+2026-02-15 23:15:51,483 - DEBUG - start_tls.started ssl_context=<ssl.SSLContext object at 0x000001E8C82B2990> server_hostname='huggingface.co' timeout=None
+2026-02-15 23:15:51,537 - DEBUG - start_tls.complete return_value=<httpcore._backends.sync.SyncStream object at 0x000001E909B924B0>
+2026-02-15 23:15:51,537 - DEBUG - send_request_headers.started request=<Request [b'GET']>
+2026-02-15 23:15:51,537 - DEBUG - send_request_headers.complete
+2026-02-15 23:15:51,537 - DEBUG - send_request_body.started request=<Request [b'GET']>
+2026-02-15 23:15:51,537 - DEBUG - send_request_body.complete
+2026-02-15 23:15:51,537 - DEBUG - receive_response_headers.started request=<Request [b'GET']>
+2026-02-15 23:15:51,845 - DEBUG - receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', [(b'Content-Type', b'application/json; charset=utf-8'), (b'Content-Length', b'4580'), (b'Connection', b'keep-alive'), (b'Date', b'Sun, 15 Feb 2026 16:15:51 GMT'), (b'ETag', b'W/"11e4-Z8mzm0FE5InEfnFOgo+FYcCsQls"'), (b'X-Powered-By', b'huggingface-moon'), (b'X-Request-Id', b'Root=1-6991f137-6ccf9e23651894756390f2a5;7bfa86fd-5c0e-4b52-a6f7-b8315250edb6'), (b'RateLimit', b'"api";r=499;t=212'), (b'RateLimit-Policy', b'"fixed window";"api";q=500;w=300'), (b'cross-origin-opener-policy', b'same-origin'), (b'Referrer-Policy', b'strict-origin-when-cross-origin'), (b'Access-Control-Max-Age', b'86400'), (b'Access-Control-Allow-Origin', b'https://huggingface.co'), (b'Vary', b'Origin'), (b'Access-Control-Expose-Headers', b'X-Repo-Commit,X-Request-Id,X-Error-Code,X-Error-Message,X-Total-Count,ETag,Link,Accept-Ranges,Content-Range,X-Linked-Size,X-Linked-ETag,X-Xet-Hash'), (b'X-Cache', b'Miss from cloudfront'), (b'Via', b'1.1 723ae979ee5eb2e913f49dec46bbf6dc.cloudfront.net (CloudFront)'), (b'X-Amz-Cf-Pop', b'SIN2-P7'), (b'X-Amz-Cf-Id', b'qjD39Oe6U0I9cPc2bvDyejDYs4b6HTeboYznxaMGTu0Re-IJGN59yg==')])
+2026-02-15 23:15:51,846 - INFO - HTTP Request: GET https://huggingface.co/api/models/Systran/faster-whisper-large-v3/revision/main "HTTP/1.1 200 OK"
+2026-02-15 23:15:51,846 - DEBUG - receive_response_body.started request=<Request [b'GET']>
+2026-02-15 23:15:51,846 - DEBUG - receive_response_body.complete
+2026-02-15 23:15:51,846 - DEBUG - response_closed.started
+2026-02-15 23:15:51,846 - DEBUG - response_closed.complete
+2026-02-15 23:15:59,283 - INFO - Processing audio with duration 00:41.928
+2026-02-15 23:15:59,636 - INFO - VAD filter removed 00:00.000 of audio
+2026-02-15 23:15:59,636 - DEBUG - VAD filter kept the following audio segments: [00:00.000 -> 00:12.960], [00:12.960 -> 00:15.952], [00:15.952 -> 00:22.704], [00:22.704 -> 00:41.928]
+2026-02-15 23:16:09,345 - INFO - Detected language 'en' with probability 1.00
+2026-02-15 23:16:09,348 - DEBUG - Processing segment at 00:00.000
+2026-02-15 23:16:37,918 - DEBUG - Processing segment at 00:28.580
+2026-02-15 23:17:01,389 - DEBUG - Starting new HTTPS connection (1): pixabay.com:443
+2026-02-15 23:17:02,007 - DEBUG - https://pixabay.com:443 "GET /api/videos/?q=dreams+and+reading&video_type=all&per_page=50&key=54552495-e9d6149ee315750c3a57e7681 HTTP/1.1" 200 None
+2026-02-15 23:17:02,389 - DEBUG - Starting new HTTPS connection (1): pixabay.com:443
+2026-02-15 23:17:02,975 - DEBUG - https://pixabay.com:443 "GET /api/videos/?q=sleeping+brain+activity&video_type=all&per_page=50&key=54552495-e9d6149ee315750c3a57e7681 HTTP/1.1" 200 None
+2026-02-15 23:17:03,390 - DEBUG - Starting new HTTPS connection (1): pixabay.com:443
+2026-02-15 23:17:04,110 - DEBUG - https://pixabay.com:443 "GET /api/videos/?q=dreams+science+for+kids&video_type=all&per_page=50&key=54552495-e9d6149ee315750c3a57e7681 HTTP/1.1" 200 None
+2026-02-15 23:17:04,391 - DEBUG - Starting new HTTPS connection (1): pixabay.com:443
+2026-02-15 23:17:04,993 - DEBUG - https://pixabay.com:443 "GET /api/videos/?q=funny+dream+facts&video_type=all&per_page=50&key=54552495-e9d6149ee315750c3a57e7681 HTTP/1.1" 200 None
+2026-02-15 23:17:05,392 - DEBUG - Starting new HTTPS connection (1): pixabay.com:443
+2026-02-15 23:17:05,990 - DEBUG - https://pixabay.com:443 "GET /api/videos/?q=child+dreaming+reading&video_type=all&per_page=50&key=54552495-e9d6149ee315750c3a57e7681 HTTP/1.1" 200 None
+2026-02-15 23:17:06,010 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:06,039 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:06,040 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:06,040 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:06,041 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:06,300 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2016/07/06/3723-173719869_large.mp4 HTTP/1.1" 200 25097882
+2026-02-15 23:17:06,322 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2021/08/05/84007-584870927_large.mp4 HTTP/1.1" 200 6174133
+2026-02-15 23:17:06,322 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2020/04/28/37422-414024545_large.mp4 HTTP/1.1" 200 5932431
+2026-02-15 23:17:06,354 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2022/09/15/131403-750559764_large.mp4 HTTP/1.1" 200 5135264
+2026-02-15 23:17:06,426 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2023/10/15/185096-874643413_large.mp4 HTTP/1.1" 200 7467835
+2026-02-15 23:17:08,828 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:09,054 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2024/05/26/213814_large.mp4 HTTP/1.1" 200 44623699
+2026-02-15 23:17:09,350 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:09,766 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:10,169 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:10,442 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2017/01/01/6973-197914400_large.mp4 HTTP/1.1" 200 3898017
+2026-02-15 23:17:10,478 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2022/06/27/122232-724743707_large.mp4 HTTP/1.1" 200 37598564
+2026-02-15 23:17:10,670 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2024/02/19/201136-914558013_large.mp4 HTTP/1.1" 200 13387413
+2026-02-15 23:17:12,254 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:12,641 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2024/05/27/213958_large.mp4 HTTP/1.1" 200 181876347
+2026-02-15 23:17:14,612 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:14,917 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2023/08/11/175540-853887878_large.mp4 HTTP/1.1" 200 105790552
+2026-02-15 23:17:21,234 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:22,529 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2021/11/06/94744-643084450_large.mp4 HTTP/1.1" 200 4182646
+2026-02-15 23:17:24,269 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:24,537 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:24,577 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2017/06/13/9883-221747487_large.mp4 HTTP/1.1" 200 5355115
+2026-02-15 23:17:24,779 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2024/08/25/228164_large.mp4 HTTP/1.1" 200 51614062
+2026-02-15 23:17:28,142 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:28,446 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2019/05/08/23411-335603656_large.mp4 HTTP/1.1" 200 12863187
+2026-02-15 23:17:31,005 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:31,273 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2022/05/04/115995-706323997_large.mp4 HTTP/1.1" 200 898678
+2026-02-15 23:17:31,718 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:32,064 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2024/08/18/227152_large.mp4 HTTP/1.1" 200 64690948
+2026-02-15 23:17:35,598 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:35,931 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2024/05/20/212818_large.mp4 HTTP/1.1" 200 21120009
+2026-02-15 23:17:43,517 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:43,841 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2017/05/11/9111-217261193_large.mp4 HTTP/1.1" 200 8338098
+2026-02-15 23:17:46,380 - DEBUG - Starting new HTTPS connection (1): cdn.pixabay.com:443
+2026-02-15 23:17:46,769 - DEBUG - https://cdn.pixabay.com:443 "GET /video/2022/11/26/140593-775389291_large.mp4 HTTP/1.1" 200 18492037
+2026-02-15 23:33:43,251 - DEBUG - Request options: {'method': 'post', 'url': '/chat/completions', 'files': None, 'json_data': {'messages': [{'role': 'user', 'content': '# Role: Video Script Generator\n\n## Goals:\nGenerate a script for a video, depending on the subject of the video.\n\n## Constrains:\n1. the script is to be returned as a string with the specified number of paragraphs.\n2. do not under any circumstance reference this prompt in your response.\n3. get straight to the point, don\'t start with unnecessary things like, "welcome to this video".\n4. you must not include any type of markdown or formatting in the script, never use a title.\n5. only return the raw content of the script.\n6. do not include "voiceover", "narrator" or similar indicators of what should be spoken at the beginning of each paragraph or line.\n7. you must not mention the prompt, or anything about the script itself. also, never talk about the amount of paragraphs or lines. just write the script.\n8. respond in the same language as the video subject.\n9. IMPORTANT: All content must be safe and appropriate for children under 10 years old. Do not include any violence, horror, sexual content, drugs, alcohol, profanity, gambling, weapons, or any disturbing or inappropriate themes. Keep the tone positive, educational, and family-friendly.\n\n# Initialization:\n- video subject: You are a YouTube SEO expert. Generate optimized metadata for a YouTube Shorts video.\n\nVideo Topic: The One Thing You Can\'t Do in Your Dreams\n\nVideo Script:\nHave you ever wondered what dreams are like? Sometimes we can fly like superheroes, talk to animals, or even visit magical candy lands. But there\'s one funny thing our brains can\'t seem to do while we\'re dreaming: read. Have you ever tried to look at a book, a sign, or even a clock in a dream? The words and numbers often look blurry, they keep changing, or they just don\'t make any sense at all. Scientists think this happens because the part of our brain that helps us read is taking a little nap \n\nGenerate the following in JSON format:\n{\n    "title": "An engaging YouTube title (max 100 chars, include keywords)",\n    "description": "A compelling description (150-300 words, include keywords, call to action, and 5 relevant hashtags at the end)",\n    "tags": ["tag1", "tag2", "tag3", "...up to 15 relevant tags"],\n    "hashtags": ["#hashtag1", "#hashtag2", "#hashtag3", "#hashtag4", "#hashtag5"]\n}\n\nRules:\n- Title must be catchy and click-worthy but NOT clickbait\n- Description should summarize the video, include a call to action (like, subscribe)\n- Tags should be relevant search terms people would use to find this video\n- All content must be in English\n- Keep it family-friendly / kids-safe\n- Return ONLY the JSON, no other text\n\n- number of paragraphs: 1\n- language: en'}], 'model': 'deepseek-v3-2-251201'}}
+2026-02-15 23:33:43,252 - DEBUG - Sending HTTP Request: POST https://ai.sumopod.com/v1/chat/completions
+2026-02-15 23:33:43,252 - DEBUG - connect_tcp.started host='ai.sumopod.com' port=443 local_address=None timeout=60.0 socket_options=None
+2026-02-15 23:33:43,340 - DEBUG - connect_tcp.complete return_value=<httpcore._backends.sync.SyncStream object at 0x000001E90A33E490>
+2026-02-15 23:33:43,340 - DEBUG - start_tls.started ssl_context=<ssl.SSLContext object at 0x000001E90A39E090> server_hostname='ai.sumopod.com' timeout=60.0
+2026-02-15 23:33:43,406 - DEBUG - start_tls.complete return_value=<httpcore._backends.sync.SyncStream object at 0x000001E90A33D770>
+2026-02-15 23:33:43,406 - DEBUG - send_request_headers.started request=<Request [b'POST']>
+2026-02-15 23:33:43,406 - DEBUG - send_request_headers.complete
+2026-02-15 23:33:43,406 - DEBUG - send_request_body.started request=<Request [b'POST']>
+2026-02-15 23:33:43,406 - DEBUG - send_request_body.complete
+2026-02-15 23:33:43,406 - DEBUG - receive_response_headers.started request=<Request [b'POST']>
+2026-02-15 23:33:49,672 - DEBUG - receive_response_headers.complete return_value=(b'HTTP/1.1', 200, b'OK', [(b'Content-Length', b'664'), (b'Content-Type', b'application/json'), (b'Date', b'Sun, 15 Feb 2026 16:33:42 GMT'), (b'Llm_provider-Content-Encoding', b'gzip'), (b'Llm_provider-Content-Length', b'444'), (b'Llm_provider-Content-Type', b'application/json; charset=utf-8'), (b'Llm_provider-Date', b'Sun, 15 Feb 2026 16:33:48 GMT'), (b'Llm_provider-Server', b'istio-envoy'), (b'Llm_provider-Vary', b'Accept-Encoding'), (b'Llm_provider-X-Client-Request-Id', b'unknown-20260216003343-JIKEvEhX'), (b'Llm_provider-X-Envoy-Upstream-Service-Time', b'6129'), (b'Llm_provider-X-Request-Id', b'021771173223248d82d61e1341a38f1d55b18f5893f198bc2c8ab'), (b'Server', b'uvicorn'), (b'X-Litellm-Attempted-Fallbacks', b'0'), (b'X-Litellm-Attempted-Retries', b'0'), (b'X-Litellm-Call-Id', b'60e28c08-1a89-460a-b6b8-78b8f1711154'), (b'X-Litellm-Key-Max-Budget', b'10.0'), (b'X-Litellm-Key-Spend', b'0.0'), (b'X-Litellm-Model-Api-Base', b'https://ark.ap-southeast.bytepluses.com/api/v3'), (b'X-Litellm-Model-Group', b'deepseek-v3-2-251201'), (b'X-Litellm-Model-Id', b'f0db87a8-0a14-45e7-bbcd-fa9c7b5640c9'), (b'X-Litellm-Overhead-Duration-Ms', b'2.092'), (b'X-Litellm-Response-Cost-Discount-Amount', b'0.0'), (b'X-Litellm-Response-Cost-Margin-Amount', b'0.0'), (b'X-Litellm-Response-Cost-Margin-Percent', b'0.0'), (b'X-Litellm-Response-Cost-Original', b'0.0'), (b'X-Litellm-Response-Duration-Ms', b'6151.139'), (b'X-Litellm-Version', b'1.81.10')])
+2026-02-15 23:33:49,672 - INFO - HTTP Request: POST https://ai.sumopod.com/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-15 23:33:49,672 - DEBUG - receive_response_body.started request=<Request [b'POST']>
+2026-02-15 23:33:49,672 - DEBUG - receive_response_body.complete
+2026-02-15 23:33:49,672 - DEBUG - response_closed.started
+2026-02-15 23:33:49,672 - DEBUG - response_closed.complete
+2026-02-15 23:33:49,672 - DEBUG - HTTP Response: POST https://ai.sumopod.com/v1/chat/completions "200 OK" Headers({'content-length': '664', 'content-type': 'application/json', 'date': 'Sun, 15 Feb 2026 16:33:42 GMT', 'llm_provider-content-encoding': 'gzip', 'llm_provider-content-length': '444', 'llm_provider-content-type': 'application/json; charset=utf-8', 'llm_provider-date': 'Sun, 15 Feb 2026 16:33:48 GMT', 'llm_provider-server': 'istio-envoy', 'llm_provider-vary': 'Accept-Encoding', 'llm_provider-x-client-request-id': 'unknown-20260216003343-JIKEvEhX', 'llm_provider-x-envoy-upstream-service-time': '6129', 'llm_provider-x-request-id': '021771173223248d82d61e1341a38f1d55b18f5893f198bc2c8ab', 'server': 'uvicorn', 'x-litellm-attempted-fallbacks': '0', 'x-litellm-attempted-retries': '0', 'x-litellm-call-id': '60e28c08-1a89-460a-b6b8-78b8f1711154', 'x-litellm-key-max-budget': '10.0', 'x-litellm-key-spend': '0.0', 'x-litellm-model-api-base': 'https://ark.ap-southeast.bytepluses.com/api/v3', 'x-litellm-model-group': 'deepseek-v3-2-251201', 'x-litellm-model-id': 'f0db87a8-0a14-45e7-bbcd-fa9c7b5640c9', 'x-litellm-overhead-duration-ms': '2.092', 'x-litellm-response-cost-discount-amount': '0.0', 'x-litellm-response-cost-margin-amount': '0.0', 'x-litellm-response-cost-margin-percent': '0.0', 'x-litellm-response-cost-original': '0.0', 'x-litellm-response-duration-ms': '6151.139', 'x-litellm-version': '1.81.10'})
+2026-02-15 23:33:49,672 - DEBUG - request_id: None
+2026-02-15 23:33:50,419 - INFO - Task execution finished. Result type: <class 'dict'>
+2026-02-15 23:33:50,420 - INFO - Result keys: dict_keys(['videos', 'combined_videos', 'script', 'terms', 'audio_file', 'audio_duration', 'subtitle_path', 'materials'])
+2026-02-15 23:33:51,338 - DEBUG - close.started
+2026-02-15 23:33:51,339 - DEBUG - close.complete

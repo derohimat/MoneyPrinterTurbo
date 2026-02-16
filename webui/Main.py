@@ -1095,11 +1095,35 @@ if start_button:
 
     # Start background thread
     def run_task():
+        import logging
+        import traceback
+        
+        # Configure logging to file
+        logging.basicConfig(
+            filename='task_debug.log', 
+            level=logging.DEBUG,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            force=True
+        )
+        
+        logging.info(f"Thread started for task {task_id}")
         try:
-            tm.start(task_id=task_id, params=params)
+            logging.info(f"Params video_subject: {params.video_subject}")
+            logging.info(f"Params video_script length: {len(params.video_script)}")
+            
+            result = tm.start(task_id=task_id, params=params)
+            
+            logging.info(f"Task execution finished. Result type: {type(result)}")
+            if result:
+                logging.info(f"Result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
+            
         except Exception as e:
-            logger.error(f"Task {task_id} failed: {e}")
-            sm.state.update_task(task_id, state=-1)
+            tb = traceback.format_exc()
+            logging.error(f"Task {task_id} CRASHED: {e}\n{tb}")
+            try:
+                sm.state.update_task(task_id, state=-1)
+            except Exception as e2:
+                logging.error(f"Failed to update task state to failed: {e2}")
 
     thread = threading.Thread(target=run_task)
     thread.start()
