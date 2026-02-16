@@ -159,3 +159,28 @@ def delete_job(job_id):
         logger.info(f"Job {job_id} deleted")
     except Exception as e:
         logger.error(f"DB Delete Error: {e}")
+
+def get_next_pending_job():
+    """Get the oldest pending job."""
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1")
+        row = c.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"DB Fetch Next Job Error: {e}")
+        return None
+
+def fail_stuck_jobs():
+    """Mark jobs stuck in 'processing' state as 'failed' (e.g. after crash)."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("UPDATE jobs SET status = 'failed', error_message = 'System crash or restart' WHERE status = 'processing'")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"DB Fail Stuck Jobs Error: {e}")

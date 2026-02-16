@@ -193,66 +193,17 @@ def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False
             video_language="en", # Force English
         )
 
-        max_retries = 3
-        retry_delays = [60, 120, 300]
-        success = False
-        attempts_used = 0
-        
-        for attempt in range(1, max_retries + 1):
-            attempts_used = attempt
-            try:
-                # task_id = str(uuid.uuid4()) # Moved outside
-                logger.info(f"  > Attempt {attempt}/{max_retries}")
-                result = tm.start(task_id, params)
-                
-                if result and "videos" in result:
-                    output_file = result["videos"][0]
-                    if os.path.exists(output_file):
-                        os.rename(output_file, final_output_path)
-                        logger.success(f"Video saved to: {final_output_path}")
-                        success = True
-                        
-                        # DB: Success
-                        db.update_job_status(task_id, "success", output_path=final_output_path, attempts=attempt)
-                    
-                    # Cleanup temp files for this task
-                    cleanup.cleanup_task(task_id)
-                    break 
-                else:
-                    logger.error(f"Failed to generate video for: {topic} (attempt {attempt})")
-                    if attempt == max_retries:
-                         db.update_job_status(task_id, "failed", error_message="Max attempts reached", attempts=attempt)
-                    
-                    cleanup.cleanup_task(task_id)  # Cleanup failed attempt
-                    
-                    if attempt < max_retries:
-                        delay = retry_delays[attempt - 1]
-                        logger.warning(f"Retrying in {delay}s...")
-                        time_module.sleep(delay)
-                    
-            except Exception as e:
-                logger.error(f"Error processing {topic} (attempt {attempt}): {str(e)}")
-                if attempt == max_retries:
-                     db.update_job_status(task_id, "failed", error_message=str(e), attempts=attempt)
+        # Insert job to DB
+        meta_data = params.dict()
+        db.insert_job(task_id, clean_subject, category, status="pending", meta=meta_data)
+        logger.success(f"Queued job: {clean_subject}")
 
-                cleanup.cleanup_task(task_id)  # Cleanup failed attempt
-                
-                if attempt < max_retries:
-                    delay = retry_delays[attempt - 1]
-                    logger.warning(f"Retrying in {delay}s...")
-                    time_module.sleep(delay)
-                else:
-                    logger.error(f"All {max_retries} attempts failed for: {topic}")
-                continue
-
-        topic_duration = time_module.time() - topic_start
-        file_size = os.path.getsize(final_output_path) if success and os.path.exists(final_output_path) else 0
         results.append({
             "topic": topic, 
-            "status": "success" if success else "failed", 
-            "duration": topic_duration, 
-            "file_size": file_size,
-            "attempts": attempts_used
+            "status": "queued", 
+            "duration": 0, 
+            "file_size": 0,
+            "attempts": 0
         })
 
     # Generate batch report

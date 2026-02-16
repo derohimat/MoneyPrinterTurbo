@@ -26,9 +26,20 @@ from app.models.schema import (
 from app.services import llm, voice
 from app.services import task as tm
 from app.services import state as sm
+from app.services.task_worker import TaskWorker
+from app.utils import db
 from app.utils import utils
 import threading
 import time
+
+# Ensure task worker starts once
+@st.cache_resource
+def start_worker():
+    worker = TaskWorker.get_instance()
+    worker.start()
+    return worker
+
+start_worker()
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
@@ -68,6 +79,8 @@ with st.expander("📜 Task History & Progress", expanded=True):
             with col2:
                 if state == 4: # PROCESSING
                     st.progress(progress / 100, text=f"Processing: {int(progress)}%")
+                elif state == 0: # QUEUED
+                    st.info("⏳ Queued")
                 elif state == 1: # COMPLETE
                     st.success("✅ Completed")
                 elif state == -1: # FAILED
@@ -1090,48 +1103,22 @@ if start_button:
                     params.video_materials = []
                 params.video_materials.append(m)
 
-    # Initialize task state
-    sm.state.update_task(task_id, state=4, progress=0, video_subject=params.video_subject) # 4=PROCESSING
+    # Initialize task state (Queued)
+    sm.state.update_task(task_id, state=0, progress=0, video_subject=params.video_subject) # 0=Queue
 
-    # Start background thread
-    def run_task():
-        import logging
-        import traceback
+    # Queue the task
+    try:
+        # Convert params to dict for DB storage
+        meta_data = params.dict()
+        db.insert_job(task_id, params.video_subject, "MainPage", status='pending', meta=meta_data)
         
-        # Configure logging to file
-        logging.basicConfig(
-            filename='task_debug.log', 
-            level=logging.DEBUG,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            force=True
-        )
+        st.toast(f"🚀 Tasks Queued! ID: {task_id}", icon="⏳")
+        st.success(f"**Task Queued!**\n\nThe video is in the processing queue.\nYou can check progress in the **Task History** section above.")
         
-        logging.info(f"Thread started for task {task_id}")
-        try:
-            logging.info(f"Params video_subject: {params.video_subject}")
-            logging.info(f"Params video_script length: {len(params.video_script)}")
-            
-            result = tm.start(task_id=task_id, params=params)
-            
-            logging.info(f"Task execution finished. Result type: {type(result)}")
-            if result:
-                logging.info(f"Result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
-            
-        except Exception as e:
-            tb = traceback.format_exc()
-            logging.error(f"Task {task_id} CRASHED: {e}\n{tb}")
-            try:
-                sm.state.update_task(task_id, state=-1)
-            except Exception as e2:
-                logging.error(f"Failed to update task state to failed: {e2}")
+    except Exception as e:
+        st.error(f"Failed to queue task: {e}")
+        sm.state.update_task(task_id, state=-1)
 
-    thread = threading.Thread(target=run_task)
-    thread.start()
-
-    st.toast(f"🚀 Tasks Started! ID: {task_id}", icon="🚀")
-    st.success(f"**Task Started!**\n\nThe video is generating in the background.\nYou can check progress in the **Task History** section above.")
-    st.info("You can now navigate to other pages or close this tab. The process will continue.")
-    
     time.sleep(1)
     st.rerun()
 
