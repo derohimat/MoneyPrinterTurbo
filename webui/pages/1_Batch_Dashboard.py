@@ -12,10 +12,21 @@ if root_dir not in sys.path:
     sys.path.append(root_dir)
 
 from app.utils import db
+from app.services.task_worker import TaskWorker
+
+
 
 st.set_page_config(page_title="Batch Dashboard", page_icon="📊", layout="wide")
 
 st.title("📊 Batch Processing Dashboard")
+
+@st.cache_resource
+def start_worker():
+    worker = TaskWorker.get_instance()
+    worker.start()
+    return worker
+
+start_worker()
 
 # Sidebar: Controls
 with st.sidebar:

@@ -32,14 +32,6 @@ from app.utils import utils
 import threading
 import time
 
-# Ensure task worker starts once
-@st.cache_resource
-def start_worker():
-    worker = TaskWorker.get_instance()
-    worker.start()
-    return worker
-
-start_worker()
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
@@ -54,6 +46,15 @@ st.set_page_config(
         "video.\n\nhttps://github.com/harry0703/MoneyPrinterTurbo",
     },
 )
+
+# Ensure task worker starts once
+@st.cache_resource
+def start_worker():
+    worker = TaskWorker.get_instance()
+    worker.start()
+    return worker
+
+start_worker()
 
 
 
