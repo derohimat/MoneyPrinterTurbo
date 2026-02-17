@@ -676,6 +676,20 @@ with middle_panel:
         params.video_concat_mode = VideoConcatMode(
             video_concat_modes[selected_index][1]
         )
+        
+        # Veo Hook Setting
+        use_veo = False
+        veo_config = config.app.get("veo", {})
+        if veo_config.get("enable", False):
+            st.divider()
+            st.write("🎥 **AI Video Generation (Veo)**")
+            use_veo = st.checkbox(tr("Use Veo for Hook (First 8s)"), value=False, help="Generate the first scene using Google Veo AI")
+            params.use_veo = use_veo
+            if use_veo:
+                params.veo_duration = 8
+            
+            if not veo_config.get("project_id"):
+                 st.warning("Veo is enabled but 'project_id' is missing in config.toml")
 
         # 视频转场模式
         video_transition_modes = [

@@ -112,6 +112,10 @@ class VideoParams(BaseModel):
     watermark_position: Optional[str] = "bottom_right"  # top_left, top_right, bottom_left, bottom_right, center
     watermark_opacity: Optional[float] = 0.7  # 0.0 to 1.0
 
+    # Veo settings
+    use_veo: Optional[bool] = False
+    veo_duration: Optional[int] = 8  # Duration for the Veo generated clip (hook)
+
 
 class SubtitleRequest(BaseModel):
     video_script: str

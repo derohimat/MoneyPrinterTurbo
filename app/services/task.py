@@ -14,6 +14,7 @@ from app.utils import utils
 from app.utils import safety_filters
 from app.utils import metadata_gen
 from app.utils import thumbnail
+from app.services.veo import generator as veo_generator
 
 
 def generate_script(task_id, params):
@@ -176,6 +177,28 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             return None
         return [material_info.url for material_info in materials]
     else:
+        # Veo Hook Generation
+        veo_materials = []
+        remaining_duration = audio_duration
+        
+        if params.use_veo:
+            logger.info("\n\n## generating veo hook video")
+            # Use specific hook prompt or first term
+            hook_prompt = f"Cinematic shot, {params.video_subject}, 8k resolution, highly detailed"
+            if isinstance(video_terms, list) and len(video_terms) > 0:
+                 hook_prompt = f"Cinematic shot, {video_terms[0]}, 8k resolution, highly detailed"
+            
+            veo_path = veo_generator.generate_video(prompt=hook_prompt, duration_seconds=params.veo_duration or 8)
+            
+            if veo_path and os.path.exists(veo_path):
+                # Create a MaterialInfo for the Veo video
+                # We save it as a "downloaded" file path effectively
+                veo_materials.append(veo_path)
+                remaining_duration = max(0, audio_duration - (params.veo_duration or 8))
+                logger.success(f"Veo hook generated: {veo_path}")
+            else:
+                logger.warning("Veo generation failed, falling back to all stock footage")
+
         logger.info(f"\n\n## downloading videos from {params.video_source}")
         downloaded_videos = material.download_videos(
             task_id=task_id,
@@ -183,7 +206,7 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             source=params.video_source,
             video_aspect=params.video_aspect,
             video_contact_mode=params.video_concat_mode,
-            audio_duration=audio_duration * params.video_count,
+            audio_duration=remaining_duration * params.video_count,
             max_clip_duration=params.video_clip_duration,
             negative_terms=params.video_negative_terms,
         )
@@ -193,7 +216,9 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
                 "failed to download videos, maybe the network is not available. if you are in China, please use a VPN."
             )
             return None
-        return downloaded_videos
+            
+        # Prepend Veo video
+        return veo_materials + downloaded_videos
 
 
 def generate_final_videos(

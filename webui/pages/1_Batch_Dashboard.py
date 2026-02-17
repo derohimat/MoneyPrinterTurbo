@@ -61,6 +61,17 @@ with st.sidebar:
         delay_seconds = int((target_dt - now).total_seconds())
         st.info(f"Scheduled: {target_dt.strftime('%d %b %H:%M')}\n(Runs in {delay_seconds//3600}h {(delay_seconds%3600)//60}m)")
 
+    
+    # Veo Hook Setting
+    use_veo = False
+    veo_config = config.app.get("veo", {})
+    if veo_config.get("enable", False):
+        st.divider()
+        st.write("🎥 **AI Video Generation (Veo)**")
+        use_veo = st.checkbox(tr("Use Veo for Hook (First 8s)"), value=False, help="Generate the first scene using Google Veo AI")
+        if not veo_config.get("project_id"):
+             st.warning("Veo is enabled but 'project_id' is missing in config.toml")
+
     # Get venv python path
     python_exe = sys.executable
     venv_python = os.path.join(root_dir, "venv", "Scripts", "python.exe")

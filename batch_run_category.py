@@ -255,6 +255,7 @@ if __name__ == "__main__":
     parser.add_argument('--delay', type=int, help='Delay in seconds before starting', default=0)
     parser.add_argument('--force', action='store_true', help='Force regeneration even if job exists')
     parser.add_argument('--resume', action='store_true', help='Only retry failed/stuck jobs, skip unprocessed topics')
+    parser.add_argument('--use-veo', action='store_true', help='Use Veo for hook (first 8s)')
     args = parser.parse_args()
     
-    run_batch(args.json_file, category_arg=args.category, delay_seconds=args.delay, force_rebuild=args.force, resume_mode=args.resume)
+    run_batch(args.json_file, category_arg=args.category, delay_seconds=args.delay, force_rebuild=args.force, resume_mode=args.resume, use_veo=args.use_veo)
