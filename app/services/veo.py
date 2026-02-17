@@ -32,11 +32,22 @@ class VeoGenerator:
             
             scopes = ["https://www.googleapis.com/auth/cloud-platform"]
             
-            if self.key_json and os.path.exists(self.key_json):
-                self.credentials = service_account.Credentials.from_service_account_file(
-                    self.key_json, scopes=scopes
-                )
-                logger.info(f"Veo: Loaded credentials from {self.key_json}")
+            if self.key_json:
+                if os.path.exists(self.key_json):
+                    self.credentials = service_account.Credentials.from_service_account_file(
+                        self.key_json, scopes=scopes
+                    )
+                    logger.info(f"Veo: Loaded credentials from file {self.key_json}")
+                else:
+                    # Try to parse as JSON string
+                    try:
+                        info = json.loads(self.key_json)
+                        self.credentials = service_account.Credentials.from_service_account_info(
+                            info, scopes=scopes
+                        )
+                        logger.info("Veo: Loaded credentials from JSON string/content")
+                    except json.JSONDecodeError:
+                        logger.error("Veo: private_key_json is neither a valid file path nor valid JSON content")
             else:
                 self.credentials, self.project_id = google.auth.default(scopes=scopes)
                 logger.info("Veo: Using default application credentials")

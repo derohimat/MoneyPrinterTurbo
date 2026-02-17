@@ -34,6 +34,7 @@ debug/
 debug_*.py
 test_*.py
 streamlit.log
+private_key.json
 
 # Batch generation outputs
 batch_outputs/

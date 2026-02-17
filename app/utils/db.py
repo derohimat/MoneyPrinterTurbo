@@ -174,12 +174,23 @@ def get_next_pending_job():
         logger.error(f"DB Fetch Next Job Error: {e}")
         return None
 
-def fail_stuck_jobs():
-    """Mark jobs stuck in 'processing' state as 'failed' (e.g. after crash)."""
+def fail_stuck_jobs(timeout_hours=0):
+    """Mark jobs stuck in 'processing' state as 'failed'."""
     try:
         conn = get_connection()
         c = conn.cursor()
-        c.execute("UPDATE jobs SET status = 'failed', error_message = 'System crash or restart' WHERE status = 'processing'")
+        
+        if timeout_hours > 0:
+            # Calculate cutoff time
+            cutoff_time = datetime.now() - timedelta(hours=timeout_hours)
+            c.execute(
+                "UPDATE jobs SET status = 'failed', error_message = 'Timeout/Stuck' WHERE status = 'processing' AND updated_at < ?",
+                (cutoff_time,)
+            )
+        else:
+            # Fail all processing jobs
+            c.execute("UPDATE jobs SET status = 'failed', error_message = 'System crash or restart' WHERE status = 'processing'")
+            
         conn.commit()
         conn.close()
     except Exception as e:
