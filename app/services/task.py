@@ -184,11 +184,46 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
         if params.use_veo:
             logger.info("\n\n## generating veo hook video")
             # Use specific hook prompt or first term
-            hook_prompt = f"Cinematic shot, {params.video_subject}, 8k resolution, highly detailed"
-            if isinstance(video_terms, list) and len(video_terms) > 0:
-                 hook_prompt = f"Cinematic shot, {video_terms[0]}, 8k resolution, highly detailed"
+            term = video_terms[0] if isinstance(video_terms, list) and len(video_terms) > 0 else params.video_subject
             
-            veo_path = veo_generator.generate_video(prompt=hook_prompt, duration_seconds=params.veo_duration or 8)
+            # Auto-generate prompts if enabled
+            if hasattr(params, 'veo_auto_prompt') and params.veo_auto_prompt:
+                try:
+                    logger.info("Auto-generating Veo prompts...")
+                    # We need the script to give context
+                    script_context = ""
+                    if isinstance(params.video_script, str):
+                        script_context = params.video_script
+                    elif isinstance(params.video_script, list):
+                        # join if list of dicts or strings (schema varies based on stage)
+                        # usually it's a list of dicts with 'text' key at this point? 
+                        # actually params.video_script is the input script usually. 
+                        # Let's use the subtitle file content if we can, or just the subject.
+                        pass
+                        
+                    # Better to use the subject and keywords
+                    context = f"Subject: {params.video_subject}. Keywords: {', '.join(video_terms)}"
+                    prompts = llm.generate_veo_prompts(params.video_subject, context)
+                    
+                    if prompts.get("prompt"):
+                        params.veo_prompt_template = prompts["prompt"]
+                        logger.info(f"Auto-generated Positive Prompt: {params.veo_prompt_template}")
+                    if prompts.get("negative_prompt"):
+                        params.veo_negative_prompt = prompts["negative_prompt"]
+                        logger.info(f"Auto-generated Negative Prompt: {params.veo_negative_prompt}")
+                except Exception as e:
+                    logger.error(f"Failed to auto-generate Veo prompts: {e}")
+
+            # Construct prompt from template
+            template = params.veo_prompt_template or "Cinematic shot of {subject}, 8k resolution, highly detailed"
+            hook_prompt = template.replace("{subject}", term)
+            
+            veo_path = veo_generator.generate_video(
+                prompt=hook_prompt, 
+                duration_seconds=params.veo_duration or 8,
+                negative_prompt=params.veo_negative_prompt,
+                aspect_ratio=params.veo_resolution or "1080p"
+            )
             
             if veo_path and os.path.exists(veo_path):
                 # Create a MaterialInfo for the Veo video

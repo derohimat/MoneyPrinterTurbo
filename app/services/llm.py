@@ -535,3 +535,44 @@ if __name__ == "__main__":
     print("######################")
     print(search_terms)
     
+def generate_veo_prompts(video_subject: str, video_script: str) -> dict:
+    """
+    Generate Veo prompts (positive and negative) based on the video subject and script.
+    """
+    prompt = f"""
+# Role: Video Director & Cinematographer
+
+# Task
+Generate a highly detailed, cinematic prompt for a video generation AI (like Google Veo) and a negative prompt to avoid unwanted elements.
+The video will be used as the **initial hook** (first 5-8 seconds) of a video about: "{video_subject}".
+
+# Video Script Context:
+{video_script[:500]}...
+
+# Instructions
+1. **Positive Prompt**: Describe the visual scene in detail. Include lighting (e.g., cinematic lighting, golden hour), camera angles (e.g., drone shot, close up), texture (e.g., 8k, photorealistic), and action. Make it catchy and relevant to the hook.
+2. **Negative Prompt**: List things to avoid (e.g., text, blurry, distorted faces, bad anatomy, cartoon, watermark).
+
+# Output Format
+Return ONLY a JSON object:
+{{
+  "prompt": "your detailed positive prompt here",
+  "negative_prompt": "your negative prompt here"
+}}
+"""
+    response = _generate_response(prompt)
+    try:
+        # Extract JSON from potential markdown code blocks
+        match = re.search(r"\{.*\}", response, re.DOTALL)
+        if match:
+            json_str = match.group()
+            return json.loads(json_str)
+        else:
+            return json.loads(response)
+    except Exception as e:
+        logger.error(f"Failed to parse Veo prompts from LLM response: {e}. Response: {response}")
+        # Fallback
+        return {
+            "prompt": f"Cinematic shot of {video_subject}, 8k resolution, highly detailed, professional lighting.",
+            "negative_prompt": "text, watermark, blurry, distorted, cartoon, low quality"
+        }

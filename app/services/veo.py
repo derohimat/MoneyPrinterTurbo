@@ -69,7 +69,7 @@ class VeoGenerator:
             logger.error(f"Veo: Failed to refresh token: {e}")
             return None
 
-    def generate_video(self, prompt: str, duration_seconds: int = 8):
+    def generate_video(self, prompt: str, duration_seconds: int = 8, negative_prompt: str = "", aspect_ratio: str = "16:9"):
         if not self.enabled:
             logger.warning("Veo is disabled in config")
             return None
@@ -84,8 +84,6 @@ class VeoGenerator:
             return None
 
         # Veo (Vertex AI) Endpoint
-        # Note: Actual endpoint path depends on the model version (e.g. publisher google vs deepmind)
-        # Using the standard Vertex AI prediction endpoint structure
         url = f"https://{self.location}-aiplatform.googleapis.com/v1/projects/{self.project_id}/locations/{self.location}/publishers/google/models/{self.model_name}:predict"
         
         headers = {
@@ -93,19 +91,31 @@ class VeoGenerator:
             "Content-Type": "application/json; charset=utf-8"
         }
         
-        # Veo Payload Structure (Approximate - need to verify exact schema for Veo)
-        # Assuming standard request format for video generation models
+        # Determine aspect ratio string if needed
+        # Veo might expect "16:9" or "9:16" directly
+        final_aspect = aspect_ratio
+        if "Portrait" in aspect_ratio:
+            final_aspect = "9:16"
+        elif "Landscape" in aspect_ratio:
+            final_aspect = "16:9"
+        elif aspect_ratio == "1080p":
+            final_aspect = "16:9" # Default fallback
+            
+        # Veo Payload Structure
+        instance = {"prompt": prompt}
+        if negative_prompt:
+             instance["negativePrompt"] = negative_prompt
+             
+        # Add aspect ratio to parameters if supported by the specific model version
+        parameters = {
+            "sampleCount": 1,
+            "aspectRatio": final_aspect,
+            "durationSeconds": duration_seconds
+        }
+        
         data = {
-            "instances": [
-                {
-                    "prompt": prompt,
-                    # "duration": f"{duration_seconds}s" # Some models take duration
-                }
-            ],
-            "parameters": {
-                "sampleCount": 1,
-                # "storageUri": f"gs://{self.bucket_name}/..." # If we had a bucket
-            }
+            "instances": [instance],
+            "parameters": parameters
         }
         
         logger.info(f"Veo: Submitting generation request for prompt: {prompt[:50]}...")

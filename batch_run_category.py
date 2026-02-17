@@ -27,7 +27,7 @@ VOICE_NAME = "en-US-ChristopherNeural"
 root_dir = os.path.dirname(os.path.abspath(__file__))
 
 
-def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False, resume_mode=False):
+def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False, resume_mode=False, use_veo=False, veo_prompt_template="", veo_negative_prompt="", veo_resolution="1080p", veo_auto_prompt=False):
     logger.remove()
     logger.add(sys.stderr, level="DEBUG")
 
@@ -166,12 +166,6 @@ def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False
         
         final_output_path = os.path.join(batch_dir, f"{safe_name}.mp4")
         
-        if os.path.exists(final_output_path):
-            logger.warning(f"Skipping {topic} (File already exists: {final_output_path})")
-            file_size = os.path.getsize(final_output_path)
-            results.append({"topic": topic, "status": "skipped", "duration": 0, "file_size": file_size, "attempts": 0})
-            continue
-
         # Get category-matched BGM
         matched_bgm = bgm_matcher.get_bgm_for_category(category)
 
@@ -191,11 +185,17 @@ def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False
             bgm_type="random" if not matched_bgm else "",
             bgm_file=matched_bgm,
             video_language="en", # Force English
+            use_veo=use_veo,
+            veo_duration=8 if use_veo else 0,
+            veo_prompt_template=veo_prompt_template,
+            veo_negative_prompt=veo_negative_prompt,
+            veo_resolution=veo_resolution,
+            veo_auto_prompt=veo_auto_prompt
         )
 
         # Insert job to DB
         meta_data = params.dict()
-        db.insert_job(task_id, clean_subject, category, status="pending", meta=meta_data)
+        db.add_job(task_id, clean_subject, category, status="pending", meta=meta_data)
         logger.success(f"Queued job: {clean_subject}")
 
         results.append({
@@ -256,6 +256,21 @@ if __name__ == "__main__":
     parser.add_argument('--force', action='store_true', help='Force regeneration even if job exists')
     parser.add_argument('--resume', action='store_true', help='Only retry failed/stuck jobs, skip unprocessed topics')
     parser.add_argument('--use-veo', action='store_true', help='Use Veo for hook (first 8s)')
+    parser.add_argument('--veo-prompt', help='Veo prompt template', default="")
+    parser.add_argument('--veo-negative', help='Veo negative prompt', default="")
+    parser.add_argument('--veo-resolution', help='Veo resolution', default="1080p")
+    parser.add_argument('--veo-auto-prompt', action='store_true', help='Auto-generate Veo prompts using LLM')
     args = parser.parse_args()
     
-    run_batch(args.json_file, category_arg=args.category, delay_seconds=args.delay, force_rebuild=args.force, resume_mode=args.resume, use_veo=args.use_veo)
+    run_batch(
+        args.json_file, 
+        category_arg=args.category, 
+        delay_seconds=args.delay, 
+        force_rebuild=args.force, 
+        resume_mode=args.resume, 
+        use_veo=args.use_veo,
+        veo_prompt_template=args.veo_prompt,
+        veo_negative_prompt=args.veo_negative,
+        veo_resolution=args.veo_resolution,
+        veo_auto_prompt=args.veo_auto_prompt
+    )

@@ -73,12 +73,64 @@ with st.sidebar:
 
     
     # Veo Hook Setting
+    # Veo Hook Setting
     use_veo = False
-    veo_config = config.app.get("veo", {})
+    veo_prompt_template = ""
+    veo_negative_prompt = ""
+    veo_resolution = "1080p"
+    veo_auto_prompt = False
+    
+    
+    
+    veo_config = config.veo
     if veo_config.get("enable", False):
         st.divider()
         st.write("🎥 **AI Video Generation (Veo)**")
-        use_veo = st.checkbox(tr("Use Veo for Hook (First 8s)"), value=False, help="Generate the first scene using Google Veo AI")
+        
+        # Persistent Settings Logic
+        use_veo_val = st.checkbox(tr("Use Veo for Hook (First 8s)"), value=veo_config.get("use_veo", False), help="Generate the first scene using Google Veo AI")
+        if use_veo_val != veo_config.get("use_veo", False):
+            config.veo["use_veo"] = use_veo_val
+            config.save_config()
+        use_veo = use_veo_val
+        
+        if use_veo:
+             st.info("Veo will generate the first 8 seconds. The rest will use stock footage.")
+             
+             auto_prompt_val = st.checkbox(tr("Auto-generate Prompts (LLM)"), value=veo_config.get("auto_prompt", False), help="Let AI write the best cinematic prompts for you based on the video subject.")
+             if auto_prompt_val != veo_config.get("auto_prompt", False):
+                 config.veo["auto_prompt"] = auto_prompt_val
+                 config.save_config()
+             veo_auto_prompt = auto_prompt_val
+             
+             if not veo_auto_prompt:
+                 prompt_val = st.text_area(tr("Veo Prompt Template"), value=veo_config.get("prompt_template", "Cinematic shot of {subject}, 8k resolution, highly detailed"), help="Use {subject} as placeholder")
+                 if prompt_val != veo_config.get("prompt_template", ""):
+                     config.veo["prompt_template"] = prompt_val
+                     config.save_config()
+                 veo_prompt_template = prompt_val
+
+                 neg_val = st.text_input(tr("Negative Prompt"), value=veo_config.get("negative_prompt", ""), help="What to avoid (if supported)")
+                 if neg_val != veo_config.get("negative_prompt", ""):
+                     config.veo["negative_prompt"] = neg_val
+                     config.save_config()
+                 veo_negative_prompt = neg_val
+             else:
+                 st.info(tr("Prompts will be auto-generated during processing."))
+                 
+             res_options = ["1080p", "Landscape (16:9)", "Portrait (9:16)"]
+             default_res = veo_config.get("resolution", "1080p")
+             try:
+                 res_index = res_options.index(default_res)
+             except ValueError:
+                 res_index = 0
+                 
+             res_val = st.selectbox(tr("Resolution / Aspect"), res_options, index=res_index)
+             if res_val != default_res:
+                 config.veo["resolution"] = res_val
+                 config.save_config()
+             veo_resolution = res_val
+
         if not veo_config.get("project_id"):
              st.warning("Veo is enabled but 'project_id' is missing in config.toml")
 
@@ -98,12 +150,24 @@ with st.sidebar:
                 cmd.append("--force")
 
             if enable_schedule and delay_seconds > 0:
-
                 cmd.extend(["--delay", str(delay_seconds)])
                 msg = f"Batch scheduled! Will run in {delay_seconds}s."
             else:
                 msg = f"Batch started for {selected_file}!"
+
+            if use_veo:
+                cmd.append("--use-veo")
+                if veo_auto_prompt:
+                    cmd.append("--veo-auto-prompt")
+                else:
+                    if veo_prompt_template:
+                        cmd.extend(["--veo-prompt", veo_prompt_template])
+                    if veo_negative_prompt:
+                        cmd.extend(["--veo-negative", veo_negative_prompt])
                 
+                if veo_resolution:
+                    cmd.extend(["--veo-resolution", veo_resolution])
+            
             subprocess.Popen(cmd, cwd=root_dir)
             st.toast(msg, icon="🚀")
             

@@ -637,17 +637,58 @@ with middle_panel:
         
         # Veo Hook Setting
         use_veo = False
-        veo_config = config.app.get("veo", {})
+        veo_config = config.veo
         if veo_config.get("enable", False):
             st.divider()
             st.write("🎥 **AI Video Generation (Veo)**")
-            use_veo = st.checkbox(tr("Use Veo for Hook (First 8s)"), value=False, help="Generate the first scene using Google Veo AI")
-            params.use_veo = use_veo
-            if use_veo:
-                params.veo_duration = 8
             
-            if not veo_config.get("project_id"):
-                 st.warning("Veo is enabled but 'project_id' is missing in config.toml")
+            # Persistent Settings Logic
+            use_veo_val = st.checkbox(tr("Use Veo for Hook (First 8s)"), value=veo_config.get("use_veo", False), help="Generate the first scene using Google Veo AI")
+            if use_veo_val != veo_config.get("use_veo", False):
+                config.veo["use_veo"] = use_veo_val
+                config.save_config()
+            params.use_veo = use_veo_val
+            
+            if params.use_veo:
+                 params.veo_duration = 8
+                 st.info("Veo will generate the first 8 seconds. The rest will use stock footage.")
+                 
+                 auto_prompt_val = st.checkbox(tr("Auto-generate Prompts (LLM)"), value=veo_config.get("auto_prompt", False), help="Let AI write the best cinematic prompts for you based on the video subject.")
+                 if auto_prompt_val != veo_config.get("auto_prompt", False):
+                     config.veo["auto_prompt"] = auto_prompt_val
+                     config.save_config()
+                 params.veo_auto_prompt = auto_prompt_val
+                 
+                 if not params.veo_auto_prompt:
+                     prompt_val = st.text_area(tr("Veo Prompt Template"), value=veo_config.get("prompt_template", "Cinematic shot of {subject}, 8k resolution, highly detailed"), help="Use {subject} as placeholder")
+                     if prompt_val != veo_config.get("prompt_template", ""):
+                         config.veo["prompt_template"] = prompt_val
+                         config.save_config()
+                     params.veo_prompt_template = prompt_val
+
+                     neg_val = st.text_input(tr("Negative Prompt"), value=veo_config.get("negative_prompt", ""), help="What to avoid (if supported)")
+                     if neg_val != veo_config.get("negative_prompt", ""):
+                         config.veo["negative_prompt"] = neg_val
+                         config.save_config()
+                     params.veo_negative_prompt = neg_val
+                 else:
+                     st.info(tr("Prompts will be auto-generated during processing."))
+                 
+                 res_options = ["1080p", "Landscape (16:9)", "Portrait (9:16)"]
+                 default_res = veo_config.get("resolution", "1080p")
+                 try:
+                     res_index = res_options.index(default_res)
+                 except ValueError:
+                     res_index = 0
+                     
+                 res_val = st.selectbox(tr("Resolution / Aspect"), res_options, index=res_index)
+                 if res_val != default_res:
+                     config.veo["resolution"] = res_val
+                     config.save_config()
+                 params.veo_resolution = res_val
+
+                 if not veo_config.get("project_id"):
+                     st.warning("Veo is enabled but 'project_id' is missing in config.toml")
 
         # 视频转场模式
         video_transition_modes = [
@@ -700,10 +741,16 @@ with middle_panel:
             ("azure-tts-v2", "Azure TTS V2"),
             ("siliconflow", "SiliconFlow TTS"),
             ("gemini-tts", "Google Gemini TTS"),
+            ("voicebox", "VoiceBox (Local)"),
         ]
 
         # 获取保存的TTS服务器，默认为v1
         saved_tts_server = config.ui.get("tts_server", "azure-tts-v1")
+        # Ensure saved server is valid, default to first if not
+        valid_servers = [s[0] for s in tts_servers]
+        if saved_tts_server not in valid_servers:
+            saved_tts_server = "azure-tts-v1"
+            
         saved_tts_server_index = 0
         for i, (server_value, _) in enumerate(tts_servers):
             if server_value == saved_tts_server:
@@ -729,6 +776,12 @@ with middle_panel:
         elif selected_tts_server == "gemini-tts":
             # 获取Gemini TTS的声音列表
             filtered_voices = voice.get_gemini_voices()
+        elif selected_tts_server == "voicebox":
+            # Get VoiceBox voices
+            with st.spinner(f"Loading VoiceBox voices from {config.voicebox.get('api_url')}..."):
+                filtered_voices = voice.get_voicebox_voices()
+            if not filtered_voices:
+                 st.error(f"Failed to fetch voices for {selected_tts_server}. Check network/config.")
         else:
             # 获取Azure的声音列表
             all_voices = voice.get_all_azure_voices(filter_locals=None)

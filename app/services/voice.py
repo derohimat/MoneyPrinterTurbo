@@ -1137,9 +1137,114 @@ def is_siliconflow_voice(voice_name: str):
     return voice_name.startswith("siliconflow:")
 
 
+def is_voicebox_voice(voice_name: str):
+    """Check if it is a VoiceBox voice"""
+    return voice_name.startswith("voicebox:")
+
+
 def is_gemini_voice(voice_name: str):
-    """检查是否是Gemini TTS的声音"""
+    """Check if it is a Gemini voice"""
     return voice_name.startswith("gemini:")
+
+
+def get_voicebox_voices() -> list[str]:
+    """
+    Get available voices from VoiceBox API
+    Returns:
+        List of voices, e.g. ["voicebox:0", "voicebox:1", ...]
+    """
+    api_url = config.app.get("voicebox", {}).get("api_url", "http://localhost:5002")
+    try:
+        # VoiceBox might not have a voices endpoint, or it might be different.
+        # Assuming we just list IDs based on what's available or user config.
+        # For now, let's try to query the API if it exists, or return a default list.
+        # If VoiceBox is local, we might just return a generic list or check a specific endpoint.
+        
+        # Taking a safer approach: Let's assume a fixed list or try to fetch.
+        # If fetch fails, return a default like "voicebox:0"
+        
+        response = requests.get(f"{api_url}/voices", timeout=2)
+        if response.status_code == 200:
+            voices = response.json()
+            # Assuming voices is a list of dicts with 'id' or just names
+            # Adjust based on actual VoiceBox API response structure
+            # For now, let's assume it returns a list of objects with 'id'
+            return [f"voicebox:{v['id']}" for v in voices]
+    except Exception:
+        pass
+        
+    # Fallback default
+    return ["voicebox:0", "voicebox:1"]
+
+
+def voicebox_tts(
+    text: str,
+    voice_name: str,
+    voice_file: str,
+) -> Union[SubMaker, None]:
+    """
+    Generate audio using VoiceBox API
+    """
+    api_url = config.app.get("voicebox", {}).get("api_url", "http://localhost:5002")
+    
+    # Extract voice ID from voice_name (remove 'voicebox:' prefix)
+    voice_id = voice_name.replace("voicebox:", "")
+    
+    # URL encoded text for GET request, or use POST
+    try:
+        # Using POST as it's safer for long text
+        payload = {
+            "text": text,
+            "speaker_id": voice_id, # VoiceBox usually uses speaker_id
+            # "style_wav": "" # If style cloning is used
+        }
+        
+        # Adjust endpoint based on VoiceBox API
+        # Common implementation: /tts with params
+        url = f"{api_url}/tts"
+        
+        response = requests.post(url, json=payload) # timeout=None as generation can be slow
+        
+        if response.status_code == 200:
+            with open(voice_file, "wb") as f:
+                f.write(response.content)
+            
+            # Create a basic SubMaker (no word alignment from VoiceBox usually)
+            sub_maker = SubMaker()
+            
+            # Get duration
+            from moviepy import AudioFileClip
+            audio_clip = AudioFileClip(voice_file)
+            audio_duration = audio_clip.duration
+            audio_clip.close()
+            
+            audio_duration_100ns = int(audio_duration * 10000000)
+            
+            # Split text for subtitles
+            sentences = utils.split_string_by_punctuations(text)
+            if sentences:
+                total_chars = sum(len(s) for s in sentences)
+                char_duration = audio_duration_100ns / total_chars if total_chars > 0 else 0
+                current_offset = 0
+                for sentence in sentences:
+                    if not sentence.strip(): continue
+                    duration = int(len(sentence) * char_duration)
+                    sub_maker.subs.append(sentence)
+                    sub_maker.offset.append((current_offset, current_offset + duration))
+                    current_offset += duration
+            else:
+                sub_maker.subs = [text]
+                sub_maker.offset = [(0, audio_duration_100ns)]
+                
+            logger.success(f"VoiceBox TTS succeeded: {voice_file}")
+            return sub_maker
+        else:
+            logger.error(f"VoiceBox TTS failed: {response.status_code} {response.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"VoiceBox TTS Exception: {e}")
+        return None
 
 
 def tts(
@@ -1152,15 +1257,12 @@ def tts(
     if is_azure_v2_voice(voice_name):
         return azure_tts_v2(text, voice_name, voice_file)
     elif is_siliconflow_voice(voice_name):
-        # 从voice_name中提取模型和声音
-        # 格式: siliconflow:model:voice-Gender
+        # ... (siliconflow logic) ...
         parts = voice_name.split(":")
         if len(parts) >= 3:
             model = parts[1]
-            # 移除性别后缀，例如 "alex-Male" -> "alex"
             voice_with_gender = parts[2]
             voice = voice_with_gender.split("-")[0]
-            # 构建完整的voice参数，格式为 "model:voice"
             full_voice = f"{model}:{voice}"
             return siliconflow_tts(
                 text, model, full_voice, voice_rate, voice_file, voice_volume
@@ -1169,17 +1271,18 @@ def tts(
             logger.error(f"Invalid siliconflow voice name format: {voice_name}")
             return None
     elif is_gemini_voice(voice_name):
-        # 从voice_name中提取声音名称
-        # 格式: gemini:voice-Gender
+        # ... (gemini logic) ...
         parts = voice_name.split(":")
         if len(parts) >= 2:
-            # 移除性别后缀，例如 "Zephyr-Female" -> "Zephyr"
             voice_with_gender = parts[1]
             voice = voice_with_gender.split("-")[0]
             return gemini_tts(text, voice, voice_rate, voice_file, voice_volume)
         else:
             logger.error(f"Invalid gemini voice name format: {voice_name}")
             return None
+    elif is_voicebox_voice(voice_name):
+        return voicebox_tts(text, voice_name, voice_file)
+        
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
 
 

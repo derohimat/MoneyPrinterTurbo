@@ -115,6 +115,10 @@ class VideoParams(BaseModel):
     # Veo settings
     use_veo: Optional[bool] = False
     veo_duration: Optional[int] = 8  # Duration for the Veo generated clip (hook)
+    veo_prompt_template: Optional[str] = "" # Custom prompt template, e.g. "Cinematic shot of {subject}, 8k"
+    veo_negative_prompt: Optional[str] = ""
+    veo_resolution: Optional[str] = "1080p" # 1080p, 720p, etc. (mapped to aspect ratio if needed)
+    veo_auto_prompt: Optional[bool] = False
 
 
 class SubtitleRequest(BaseModel):
