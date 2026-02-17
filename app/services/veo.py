@@ -100,7 +100,8 @@ class VeoGenerator:
         logger.info(f"Veo: Submitting generation request for prompt: {prompt[:50]}...")
         
         try:
-            response = requests.post(url, headers=headers, json=data)
+            # Set a long timeout (e.g., 5 minutes) as video generation can be slow
+            response = requests.post(url, headers=headers, json=data, timeout=300)
             
             if response.status_code != 200:
                 logger.error(f"Veo Request Failed ({response.status_code}): {response.text}")

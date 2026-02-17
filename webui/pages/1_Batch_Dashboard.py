@@ -12,13 +12,23 @@ if root_dir not in sys.path:
     sys.path.append(root_dir)
 
 from app.utils import db
+from app.utils import utils
+from app.config import config
 from app.services.task_worker import TaskWorker
-
 
 
 st.set_page_config(page_title="Batch Dashboard", page_icon="📊", layout="wide")
 
 st.title("📊 Batch Processing Dashboard")
+
+# Initialize language
+i18n_dir = os.path.join(root_dir, "webui", "i18n")
+locales = utils.load_locales(i18n_dir)
+
+def tr(key):
+    loc = locales.get(st.session_state.get("ui_language", "en-US"), {})
+    return loc.get("Translation", {}).get(key, key)
+
 
 @st.cache_resource
 def start_worker():
@@ -119,6 +129,12 @@ with st.sidebar:
             st.rerun()
         else:
             st.error("Please select a tasks file.")
+            
+    if st.button("⚠️ Reset Stuck Jobs (Force)", type="primary", help="Force set all 'processing' jobs to 'failed' so they can be resumed. Use only if worker is not running."):
+        db.fail_stuck_jobs(timeout_hours=0) # 0 means reset all processing jobs immediately
+        st.toast("Reset all stuck jobs to 'failed'. You can now Resume.", icon="⚠️")
+        time.sleep(1)
+        st.rerun()
 
     st.divider()
     if st.button("🔄 Refresh Data"):
