@@ -58,49 +58,7 @@ start_worker()
 
 
 
-# --- Task History Section ---
-with st.expander("📜 Task History & Progress", expanded=True):
-    if st.button("🔄 Refresh History"):
-        st.rerun()
-        
-    tasks, total = sm.state.get_all_tasks(page=1, page_size=10)
-    if not tasks:
-        st.info("No tasks found.")
-    else:
-        for task in tasks:
-            task_id = task.get("task_id")
-            state = task.get("state")
-            progress = task.get("progress", 0)
-            subject = task.get("video_subject", "Unknown Subject")
-            
-            col1, col2, col3 = st.columns([3, 2, 2])
-            with col1:
-                st.write(f"**{subject}**")
-                st.caption(f"ID: `{task_id[:8]}...`")
-            with col2:
-                if state == 4: # PROCESSING
-                    st.progress(progress / 100, text=f"Processing: {int(progress)}%")
-                elif state == 0: # QUEUED
-                    st.info("⏳ Queued")
-                elif state == 1: # COMPLETE
-                    st.success("✅ Completed")
-                elif state == -1: # FAILED
-                    st.error("❌ Failed")
-                else:
-                    st.write(f"State: {state}")
-            with col3:
-                if state == 1 and "videos" in task:
-                    video_url = task["videos"][0]
-                    if os.path.exists(video_url):
-                        st.video(video_url)
-                    else:
-                        st.warning("File not found")
-
-    # Auto-refresh if any task is running
-    p_tasks, _ = sm.state.get_all_tasks(1, 100)
-    if any(t.get("state") == 4 for t in p_tasks):
-        time.sleep(2)
-        st.rerun()
+# Task History moved to separate page
 
 st.divider()
 
