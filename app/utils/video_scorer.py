@@ -113,7 +113,21 @@ def score_video(
         # Stability bonus (0-10 points) — file opens and reads cleanly
         score += 10
         details["stability_score"] = 10
-        
+
+        # [I3] Tag match score (0-10 points)
+        # Use filename/path as a proxy for video tags (since we don't have tags post-download).
+        # The real tag matching happens in material.py validate_video_metadata before download.
+        # Here we give a small bonus if the search term keywords appear in the file path.
+        if search_term:
+            tokens = [t.strip().lower() for t in search_term.split() if len(t) > 2]
+            path_lower = video_path.lower()
+            matched = sum(1 for t in tokens if t in path_lower)
+            tag_score = min(10, matched * 3)
+            score += tag_score
+            details["tag_match_score"] = tag_score
+        else:
+            details["tag_match_score"] = 0
+
         clip.close()
         
         passed = score >= 40  # Minimum threshold
@@ -129,6 +143,7 @@ def score_video(
 def filter_videos_by_quality(
     video_paths: list,
     min_score: int = 40,
+    search_term: str = "",
 ) -> list:
     """
     Filter a list of video paths, keeping only those that pass quality scoring.
@@ -136,6 +151,7 @@ def filter_videos_by_quality(
     Args:
         video_paths: List of video file paths
         min_score: Minimum score to keep (0-100)
+        search_term: Used to compute tag match bonus score
     
     Returns:
         Filtered list of video paths sorted by score (best first)
@@ -143,7 +159,7 @@ def filter_videos_by_quality(
     scored_videos = []
     
     for path in video_paths:
-        result = score_video(path)
+        result = score_video(path, search_term=search_term)
         if result["passed"] and result["score"] >= min_score:
             scored_videos.append((path, result["score"]))
             logger.debug(f"Video PASSED ({result['score']}/100): {os.path.basename(path)}")
