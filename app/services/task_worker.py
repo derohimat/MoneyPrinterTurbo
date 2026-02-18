@@ -2,6 +2,7 @@ import threading
 import time
 import json
 import traceback
+import hashlib
 from loguru import logger
 from app.utils import db
 from app.services import task as tm
@@ -91,6 +92,7 @@ class TaskWorker:
         logger.info(f"[Worker-{worker_id}] 👷 processing job: {job_id} | {job['topic']}")
         
         db.update_job_status(job_id, 'processing')
+        job_start_time = time.time()  # [N2] Track start time
         
         try:
             # Reconstruct params
@@ -107,10 +109,16 @@ class TaskWorker:
 
             if not params:
                 params = VideoParams(video_subject=job['topic'])
+
+            # [N3] Compute prompt_hash from subject + language for A/B tracking
+            prompt_key = f"{params.video_subject}|{getattr(params, 'video_language', 'en')}"
+            prompt_hash = hashlib.sha256(prompt_key.encode()).hexdigest()[:12]
             
             # Execute task
             result = tm.start(task_id=job_id, params=params)
             
+            elapsed = round(time.time() - job_start_time, 1)  # [N2]
+
             if result and "videos" in result and result["videos"]:
                 output_path = result["videos"][0]
                 db.update_job_status(
@@ -119,7 +127,8 @@ class TaskWorker:
                     output_path=output_path, 
                     attempts=job.get('attempts', 0) + 1
                 )
-                logger.success(f"[Worker-{worker_id}] ✅ Job {job_id} Completed: {output_path}")
+                db.update_job_duration(job_id, elapsed)  # [N2]
+                logger.success(f"[Worker-{worker_id}] ✅ Job {job_id} Completed in {elapsed}s: {output_path}")
             else:
                 error_msg = "No video produced (tm.start returned empty result)"
                 logger.error(f"[Worker-{worker_id}] ❌ Job {job_id} Failed: {error_msg}")
@@ -129,8 +138,10 @@ class TaskWorker:
                     error_message=error_msg,
                     attempts=job.get('attempts', 0) + 1
                 )
+                db.update_job_duration(job_id, elapsed)  # [N2] track even on failure
 
         except Exception as e:
+            elapsed = round(time.time() - job_start_time, 1)
             tb = traceback.format_exc()
             logger.error(f"[Worker-{worker_id}] ❌ Job {job_id} Crashed: {e}\n{tb}")
             db.update_job_status(
@@ -139,3 +150,4 @@ class TaskWorker:
                 error_message=str(e),
                 attempts=job.get('attempts', 0) + 1
             )
+            db.update_job_duration(job_id, elapsed)  # [N2]

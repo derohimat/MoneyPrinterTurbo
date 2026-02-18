@@ -5,7 +5,8 @@ Handles SQLite connection and job tracking.
 import sqlite3
 import json
 import os
-from datetime import datetime
+import hashlib
+from datetime import datetime, timedelta
 from loguru import logger
 from app.utils import utils
 
@@ -27,9 +28,22 @@ def init_db():
             output_path TEXT,
             attempts INTEGER DEFAULT 0,
             error_message TEXT,
-            meta_json TEXT
+            meta_json TEXT,
+            duration_seconds REAL DEFAULT NULL,
+            rating INTEGER DEFAULT NULL,
+            prompt_hash TEXT DEFAULT NULL
         )
     """)
+    # Migrate existing DB: add new columns if missing
+    for col, col_def in [
+        ("duration_seconds", "REAL DEFAULT NULL"),
+        ("rating", "INTEGER DEFAULT NULL"),
+        ("prompt_hash", "TEXT DEFAULT NULL"),
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_def}")
+        except Exception:
+            pass  # Column already exists
     conn.commit()
     conn.close()
     logger.info(f"Database initialized at {DB_PATH}")
@@ -228,3 +242,110 @@ def fail_stuck_jobs(timeout_hours=0):
         conn.close()
     except Exception as e:
         logger.error(f"DB Fail Stuck Jobs Error: {e}")
+
+
+def update_job_duration(job_id: str, duration_seconds: float) -> None:
+    """[N2] Record how long a job took to complete."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute(
+            "UPDATE jobs SET duration_seconds = ? WHERE id = ?",
+            (round(duration_seconds, 1), job_id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"DB Duration Update Error: {e}")
+
+
+def get_avg_job_duration(category: str = None, last_n: int = 10) -> float | None:
+    """
+    [N2] Return average duration (seconds) of the last N successful jobs.
+    Used to compute ETA for pending/processing jobs.
+    """
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        if category:
+            c.execute(
+                "SELECT duration_seconds FROM jobs WHERE status='success' AND category=? AND duration_seconds IS NOT NULL ORDER BY updated_at DESC LIMIT ?",
+                (category, last_n)
+            )
+        else:
+            c.execute(
+                "SELECT duration_seconds FROM jobs WHERE status='success' AND duration_seconds IS NOT NULL ORDER BY updated_at DESC LIMIT ?",
+                (last_n,)
+            )
+        rows = c.fetchall()
+        conn.close()
+        if not rows:
+            return None
+        durations = [r[0] for r in rows if r[0] and r[0] > 0]
+        return round(sum(durations) / len(durations), 1) if durations else None
+    except Exception as e:
+        logger.error(f"DB Avg Duration Error: {e}")
+        return None
+
+
+def rate_job(job_id: str, rating: int) -> None:
+    """
+    [N3] Store user rating for a job. rating: 1 = 👍, -1 = 👎.
+    """
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("UPDATE jobs SET rating = ? WHERE id = ?", (rating, job_id))
+        conn.commit()
+        conn.close()
+        logger.info(f"Job {job_id} rated: {'👍' if rating > 0 else '👎'}")
+    except Exception as e:
+        logger.error(f"DB Rate Job Error: {e}")
+
+
+def get_prompt_rating_stats() -> list[dict]:
+    """
+    [N3] Return aggregated rating stats grouped by prompt_hash.
+    Used to identify which prompt variants perform best.
+    """
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("""
+            SELECT prompt_hash,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) as thumbs_up,
+                   SUM(CASE WHEN rating = -1 THEN 1 ELSE 0 END) as thumbs_down,
+                   AVG(duration_seconds) as avg_duration
+            FROM jobs
+            WHERE prompt_hash IS NOT NULL
+            GROUP BY prompt_hash
+            ORDER BY thumbs_up DESC
+        """)
+        rows = c.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error(f"DB Prompt Stats Error: {e}")
+        return []
+
+
+def add_job(job_id, topic, category, status="pending", meta=None, prompt_hash=None):
+    """Alias for insert_job with prompt_hash support."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        meta_str = json.dumps(meta) if meta else "{}"
+        c.execute("SELECT id FROM jobs WHERE id=?", (job_id,))
+        if c.fetchone():
+            conn.close()
+            return
+        c.execute("""
+            INSERT INTO jobs (id, topic, category, status, created_at, updated_at, meta_json, prompt_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (job_id, topic, category, status, datetime.now(), datetime.now(), meta_str, prompt_hash))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"DB Add Job Error: {e}")
