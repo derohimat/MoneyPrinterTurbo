@@ -10,6 +10,7 @@ if root_dir not in sys.path:
 
 from app.services import state as sm
 from app.services.task_worker import TaskWorker
+from app.utils import utils
 
 # Set page config
 st.set_page_config(page_title="Task History", page_icon="📜", layout="wide")
@@ -54,6 +55,10 @@ else:
             else:
                 st.write(f"State: {state}")
         with col3:
+            if st.button("📂 Open Folder", key=f"btn_open_{task_id}"):
+                task_dir = utils.task_dir(task_id)
+                utils.open_folder(task_dir)
+
             if state == 1 and "videos" in task:
                 video_url = task["videos"][0]
                 if os.path.exists(video_url):

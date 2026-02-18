@@ -94,7 +94,12 @@ def generate_audio(task_id, params, video_script):
             )
         else:
             logger.info("no custom audio file provided, using TTS to generate audio.")
-        audio_file = path.join(utils.task_dir(task_id), "audio.mp3")
+        
+        # Construct filename: Category_Subject.mp3
+        category = getattr(params, "video_category", "General") or "General"
+        subject = params.video_subject
+        safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{category}_{subject}").replace(" ", "_")
+        audio_file = path.join(utils.task_dir(task_id), f"{safe_name}.mp3")
         sub_maker = voice.tts(
             text=video_script,
             voice_name=voice.parse_voice_name(params.voice_name),
@@ -137,7 +142,11 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     if not params.subtitle_enabled or sub_maker is None:
         return ""
 
-    subtitle_path = path.join(utils.task_dir(task_id), "subtitle.srt")
+    # Construct filename: Category_Subject.srt
+    category = getattr(params, "video_category", "General") or "General"
+    subject = params.video_subject
+    safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{category}_{subject}").replace(" ", "_")
+    subtitle_path = path.join(utils.task_dir(task_id), f"{safe_name}.srt")
     subtitle_provider = config.app.get("subtitle_provider", "edge").strip().lower()
     logger.info(f"\n\n## generating subtitle, provider: {subtitle_provider}")
 
@@ -287,7 +296,15 @@ def generate_final_videos(
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
 
-        final_video_path = path.join(utils.task_dir(task_id), f"final-{index}.mp4")
+        # Construct filename: Category_Subject.mp4
+        category = getattr(params, "video_category", "General") or "General"
+        subject = params.video_subject
+        safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{category}_{subject}").replace(" ", "_")
+        
+        if params.video_count > 1:
+            final_video_path = path.join(utils.task_dir(task_id), f"{safe_name}_{index}.mp4")
+        else:
+            final_video_path = path.join(utils.task_dir(task_id), f"{safe_name}.mp4")
 
         logger.info(f"\n\n## generating video: {index} => {final_video_path}")
         video.generate_video(
@@ -322,7 +339,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     # 1. Generate script
     video_script = generate_script(task_id, params)
-    if not video_script or "Error: " in video_script:
+    if not video_script:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
 

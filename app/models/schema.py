@@ -69,6 +69,7 @@ class VideoParams(BaseModel):
     """
 
     video_subject: str
+    video_category: Optional[str] = "General"  # Category for file naming
     video_script: str = ""  # Script used to generate the video
     video_terms: Optional[str | list] = None  # Keywords used to generate the video
     video_negative_terms: Optional[str | list] = None  # Negative keywords used to filter the video

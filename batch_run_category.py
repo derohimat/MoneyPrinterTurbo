@@ -172,6 +172,7 @@ def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False
         # Configure Video Params
         params = VideoParams(
             video_subject=clean_subject,
+            video_category=category,
             video_script="",
             video_terms=search_terms if search_terms else None,
             video_negative_terms=negative_terms if negative_terms else None,

@@ -228,3 +228,25 @@ def load_locales(i18n_dir):
 
 def parse_extension(filename):
     return Path(filename).suffix.lower().lstrip('.')
+
+
+def open_folder(path: str):
+    """
+    Open a folder in the system's file explorer.
+    """
+    try:
+        if not os.path.exists(path):
+            logger.warning(f"folder not found: {path}")
+            return
+
+        if os.name == 'nt':  # Windows
+            os.startfile(path)
+        elif os.name == 'posix':  # macOS or Linux
+            if sys.platform == 'darwin':  # macOS
+                import subprocess
+                subprocess.call(['open', path])
+            else:  # Linux
+                import subprocess
+                subprocess.call(['xdg-open', path])
+    except Exception as e:
+        logger.error(f"failed to open folder: {e}")

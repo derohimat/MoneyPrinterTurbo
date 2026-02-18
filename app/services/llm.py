@@ -451,6 +451,7 @@ Generate a script for a video, depending on the subject of the video.
             time.sleep(2 * (i + 1))  # exponential backoff
     if "Error: " in final_script:
         logger.error(f"failed to generate video script: {final_script}")
+        return None
     else:
         logger.success(f"completed: \n{final_script}")
     return final_script.strip()
@@ -461,22 +462,24 @@ def generate_terms(video_subject: str, video_script: str, amount: int = 5) -> Li
 # Role: Video Search Terms Generator
 
 ## Goals:
-Generate {amount} search terms for stock videos, depending on the subject of a video.
+Generate {amount} highly specific search terms for stock videos, based on the video subject and script.
 
-## Constrains:
-1. the search terms are to be returned as a json-array of strings.
-2. each search term should consist of 1-3 words, always add the main subject of the video.
-3. you must only return the json-array of strings. you must not return anything else. you must not return the script.
-4. the search terms must be related to the subject of the video.
-5. reply with english search terms only.
-6. IMPORTANT: All search terms must be safe and appropriate for children. Do not generate terms related to violence, horror, weapons, sexual content, drugs, alcohol, gambling, or anything inappropriate for children under 10.
+## Constraints:
+1. The search terms must be returned as a JSON-array of strings.
+2. **CRITICAL**: Each search term MUST include the main subject "{video_subject}" or a direct synonym.
+   - BAD: "happy people", "sunset", "nature", "sky"
+   - GOOD: "{video_subject} happy people", "{video_subject} sunset", "{video_subject} nature"
+3. Do NOT generate abstract concepts like "culture", "happiness", "love", "peace" on their own. They result in irrelevant videos.
+4. Reply with English search terms only.
+5. All search terms must be safe and appropriate for children (no violence, sexual content, etc.).
 
 ## Output Example:
-["search term 1", "search term 2", "search term 3","search term 4","search term 5"]
+["{video_subject} celebration", "{video_subject} food", "{video_subject} praying", "{video_subject} family"]
 
 ## Context:
 ### Video Subject
 {video_subject}
+
 
 ### Video Script
 {video_script}
@@ -492,8 +495,8 @@ Please note that you must use English for generating video search terms; Chinese
         try:
             response = _generate_response(prompt)
             if "Error: " in response:
-                logger.error(f"failed to generate video script: {response}")
-                return response
+                logger.error(f"failed to generate video terms: {response}")
+                return None
             search_terms = json.loads(response)
             if not isinstance(search_terms, list) or not all(
                 isinstance(term, str) for term in search_terms
@@ -550,8 +553,13 @@ The video will be used as the **initial hook** (first 5-8 seconds) of a video ab
 {video_script[:500]}...
 
 # Instructions
-1. **Positive Prompt**: Describe the visual scene in detail. Include lighting (e.g., cinematic lighting, golden hour), camera angles (e.g., drone shot, close up), texture (e.g., 8k, photorealistic), and action. Make it catchy and relevant to the hook.
-2. **Negative Prompt**: List things to avoid (e.g., text, blurry, distorted faces, bad anatomy, cartoon, watermark).
+1. **Positive Prompt**: Describe the visual scene in detail.
+   - Style: **Photorealistic, Cinematic, 4k, High Detail**.
+   - Lighting: Cinematic lighting, golden hour, or dramatic lighting.
+   - Camera: Drone shot, close up, or tracking shot.
+   - Content: Make it catchy and relevant to the hook. Focus on the main subject.
+2. **Negative Prompt**: STRICTLY avoid these elements:
+   - text, watermark, logo, copyright, blurry, distorted, bad anatomy, deformed, cartoon, illustration, painting, low quality, pixelated.
 
 # Output Format
 Return ONLY a JSON object:
