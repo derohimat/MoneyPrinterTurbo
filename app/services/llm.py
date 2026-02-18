@@ -560,6 +560,77 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
+def generate_scene_terms(video_subject: str, video_script: str, use_faceless: bool = False) -> list[dict]:
+    """
+    [C3] Scene-Aware Video Matching: generate one search term per script sentence.
+    Returns a list of dicts: [{"sentence": "...", "term": "..."}, ...]
+    Falls back to regular generate_terms if LLM fails.
+    """
+    faceless_note = ""
+    if use_faceless:
+        faceless_note = "\n- AVOID terms with faces, portraits, or people looking at camera."
+
+    prompt = f"""
+# Role: Scene-Aware Video Director
+
+## Task
+You are given a video script. For EACH sentence, generate ONE highly specific stock video search term
+that visually represents what is being narrated at that moment.
+
+## Rules
+1. Return ONLY a JSON array of objects with "sentence" and "term" keys.
+2. Each "term" must be 2-5 words, suitable for stock video search (Pexels/Pixabay).
+3. Terms must be in English.
+4. Match the visual mood and content of each sentence.
+5. Avoid generic terms like "video", "footage", "clip".{faceless_note}
+
+## Script
+{video_script}
+
+## Output Format (JSON only, no markdown):
+[
+  {{"sentence": "First sentence of script.", "term": "specific visual search term"}},
+  {{"sentence": "Second sentence.", "term": "another specific term"}}
+]
+""".strip()
+
+    logger.info(f"[C3] Generating scene-aware terms for {len(video_script.split('.'))} sentences...")
+
+    # Check cache
+    _hash = hashlib.md5(video_script.encode()).hexdigest()[:8]
+    cached = llm_cache.get("scene_terms", subject=video_subject, script_hash=_hash, faceless=use_faceless)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
+
+    scene_terms = []
+    for i in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if not response:
+                continue
+            # Extract JSON array
+            match = re.search(r"\[.*\]", response, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group())
+                if isinstance(parsed, list) and all("term" in item for item in parsed):
+                    scene_terms = parsed
+                    break
+        except Exception as e:
+            logger.warning(f"[C3] Scene terms attempt {i+1} failed: {e}")
+            time.sleep(2 * (i + 1))
+
+    if scene_terms:
+        llm_cache.set("scene_terms", json.dumps(scene_terms), subject=video_subject, script_hash=_hash, faceless=use_faceless)
+        logger.success(f"[C3] Generated {len(scene_terms)} scene-aware terms")
+    else:
+        logger.warning("[C3] Scene terms generation failed, falling back to regular terms")
+
+    return scene_terms
+
+
 if __name__ == "__main__":
     video_subject = "生命的意义是什么"
     script = generate_script(

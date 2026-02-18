@@ -390,11 +390,25 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     # 2. Generate search terms
     video_terms = ""
+    video_scene_terms = []  # [C3] per-sentence scene terms
     if params.video_source != "local":
         video_terms = generate_terms(task_id, params, video_script)
         if not video_terms:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             return
+
+        # [C3] Scene-aware matching: generate per-sentence terms in parallel with audio
+        # We generate them here so they're ready when material download starts.
+        try:
+            video_scene_terms = llm.generate_scene_terms(
+                video_subject=params.video_subject,
+                video_script=video_script,
+                use_faceless=getattr(params, 'use_faceless', False),
+            )
+            if video_scene_terms:
+                logger.info(f"[C3] Scene-aware terms ready: {len(video_scene_terms)} scenes")
+        except Exception as e:
+            logger.warning(f"[C3] Scene terms failed (non-critical): {e}")
 
     save_script_data(task_id, video_script, video_terms, params)
 
@@ -422,6 +436,12 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         word_count = len(video_script.split())
         estimated_duration = int((word_count / 130) * 60) + 5
         logger.info(f"Estimated audio duration: {estimated_duration}s (from {word_count} words)")
+
+        # [C3] Use scene-aware terms if available, otherwise fall back to regular terms
+        if video_scene_terms:
+            scene_search_terms = [item["term"] for item in video_scene_terms if "term" in item]
+            logger.info(f"[C3] Using {len(scene_search_terms)} scene-aware search terms")
+            return get_video_materials(task_id, params, scene_search_terms, estimated_duration)
         return get_video_materials(task_id, params, video_terms, estimated_duration)
 
     if stop_at in ("audio", "subtitle", "materials", "video"):
