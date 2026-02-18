@@ -417,7 +417,12 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         return generate_audio(task_id, params, video_script)
 
     def _run_materials():
-        return get_video_materials(task_id, params, video_terms, 9999)  # placeholder duration
+        # [C1] Estimate audio duration from word count before TTS completes.
+        # Average speaking rate: ~130 words/minute. Add 5s buffer.
+        word_count = len(video_script.split())
+        estimated_duration = int((word_count / 130) * 60) + 5
+        logger.info(f"Estimated audio duration: {estimated_duration}s (from {word_count} words)")
+        return get_video_materials(task_id, params, video_terms, estimated_duration)
 
     if stop_at in ("audio", "subtitle", "materials", "video"):
         logger.info("## [PARALLEL] Starting audio generation + material download concurrently...")
