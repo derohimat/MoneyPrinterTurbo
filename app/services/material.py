@@ -1,7 +1,8 @@
+
 import os
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List
+from typing import Any, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import requests
@@ -33,6 +34,63 @@ def get_api_key(cfg_key: str):
     global requested_count
     requested_count += 1
     return api_keys[requested_count % len(api_keys)]
+
+
+
+GENERIC_TERMS = {
+    "background", "view", "scene", "video", "clip", "stock", "footage", 
+    "hd", "4k", "sky", "blue", "white", "black", "green", "red",
+    "nature", "landscape", "people", "happy", "person", "man", "woman",
+    "girl", "boy", "day", "night", "light", "dark", "slow", "motion"
+}
+
+def validate_video_metadata(video_tags: List[str], video_title: str, search_term: str) -> Tuple[bool, str]:
+    """
+    Validates if the video metadata matches the search term strictly.
+    Returns (is_valid, reason)
+    """
+    search_tokens = [t.strip().lower() for t in search_term.split()]
+    # Filter out generic terms to find 'specific' keywords
+    specific_tokens = [t for t in search_tokens if t not in GENERIC_TERMS and len(t) > 2]
+    
+    # If all tokens are generic (e.g., "Blue Sky"), fall back to using all tokens
+    validation_tokens = specific_tokens if specific_tokens else search_tokens
+    
+    # Combine tags and title for checking
+    # Note: validation_tokens are AND or OR?
+    # If search is "Ramadan Mosque", we probably want "Ramadan" OR "Mosque" as a hit, 
+    # but preferably "Ramadan".
+    # Since we filtered generics, "Ramadan Nature" -> "Ramadan".
+    # We require AT LEAST ONE specific token to be present.
+    
+    found_match = False
+    matched_token = ""
+    
+    # Check title/slug
+    title_lower = video_title.lower()
+    for token in validation_tokens:
+        if token in title_lower:
+            found_match = True
+            matched_token = token
+            break
+            
+    if not found_match:
+        # Check tags (exact or partial match?)
+        # Tags in Pexels are usually single words or phrases.
+        for tag in video_tags:
+            tag_lower = tag.lower()
+            for token in validation_tokens:
+                if token in tag_lower:
+                    found_match = True
+                    matched_token = token
+                    break
+            if found_match:
+                break
+                
+    if found_match:
+        return True, f"Matched '{matched_token}'"
+    else:
+        return False, f"Missing specific keywords: {validation_tokens}"
 
 
 def search_videos_pexels(
@@ -97,6 +155,16 @@ def search_videos_pexels(
                 
                 if should_skip:
                     logger.warning(f"Skipping video due to negative term: {v.get('url')}")
+                    continue
+
+                # STRICT METADATA VALIDATION
+                # Extract subject/keywords
+                video_url_slug = v.get("url", "").lower()
+                video_tags = [t.lower() for t in v.get("tags", [])]
+                
+                is_valid, reason = validate_video_metadata(video_tags, video_url_slug, search_term)
+                if not is_valid:
+                    logger.warning(f"Skipping video due to metadata mismatch: {v.get('url')} | Reason: {reason}")
                     continue
 
             duration = v["duration"]
@@ -173,6 +241,15 @@ def search_videos_pixabay(
                 
                 if should_skip:
                     logger.warning(f"Skipping video due to negative term: {v.get('pageURL')}")
+                    continue
+
+                # STRICT METADATA VALIDATION
+                video_title = v.get("pageURL", "").lower()
+                video_tags = [t.strip().lower() for t in v.get("tags", "").split(",")]
+                
+                is_valid, reason = validate_video_metadata(video_tags, video_title, search_term)
+                if not is_valid:
+                    logger.warning(f"Skipping video due to metadata mismatch: {v.get('pageURL')} | Reason: {reason}")
                     continue
 
             duration = v["duration"]

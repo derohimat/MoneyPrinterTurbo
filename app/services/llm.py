@@ -467,14 +467,15 @@ Generate {amount} highly specific search terms for stock videos, based on the vi
 ## Constraints:
 1. The search terms must be returned as a JSON-array of strings.
 2. **CRITICAL**: Each search term MUST include the main subject "{video_subject}" or a direct synonym.
-   - BAD: "happy people", "sunset", "nature", "sky"
-   - GOOD: "{video_subject} happy people", "{video_subject} sunset", "{video_subject} nature"
-3. Do NOT generate abstract concepts like "culture", "happiness", "love", "peace" on their own. They result in irrelevant videos.
-4. Reply with English search terms only.
-5. All search terms must be safe and appropriate for children (no violence, sexual content, etc.).
+3. **VISUAL FOCUS**: Generate terms that represent **tangible objects** or **visual scenes**.
+   - BAD: "{video_subject} culture", "{video_subject} happiness", "{video_subject} background", "{video_subject} nature"
+   - GOOD: "{video_subject} lantern", "{video_subject} eating dates", "{video_subject} praying hands", "{video_subject} mosque architecture"
+4. Avoid generic words like "video", "footage", "4k", "hd", "scene".
+5. Reply with English search terms only.
+6. All search terms must be safe and appropriate for children.
 
 ## Output Example:
-["{video_subject} celebration", "{video_subject} food", "{video_subject} praying", "{video_subject} family"]
+["{video_subject} celebration dinner", "{video_subject} traditional clothes", "{video_subject} praying", "{video_subject} family gathering"]
 
 ## Context:
 ### Video Subject
