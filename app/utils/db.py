@@ -161,7 +161,7 @@ def delete_job(job_id):
         logger.error(f"DB Delete Error: {e}")
 
 def get_next_pending_job():
-    """Get the oldest pending job."""
+    """Get the oldest pending job (non-atomic, for single-worker use)."""
     try:
         conn = get_connection()
         conn.row_factory = sqlite3.Row
@@ -173,6 +173,39 @@ def get_next_pending_job():
     except Exception as e:
         logger.error(f"DB Fetch Next Job Error: {e}")
         return None
+
+
+def claim_next_pending_job() -> dict | None:
+    """
+    [I1] Atomically claim the next pending job by immediately setting its status
+    to 'processing'. This prevents multiple parallel workers from picking the same job.
+    Returns the claimed job dict, or None if no pending jobs exist.
+    """
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None  # autocommit off for manual transaction
+        c = conn.cursor()
+        c.execute("BEGIN EXCLUSIVE")
+        c.execute("SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1")
+        row = c.fetchone()
+        if row:
+            job = dict(row)
+            c.execute(
+                "UPDATE jobs SET status = 'processing', updated_at = ? WHERE id = ?",
+                (datetime.now().isoformat(), job['id'])
+            )
+            c.execute("COMMIT")
+            conn.close()
+            return job
+        else:
+            c.execute("ROLLBACK")
+            conn.close()
+            return None
+    except Exception as e:
+        logger.error(f"DB Claim Job Error: {e}")
+        return None
+
 
 def fail_stuck_jobs(timeout_hours=0):
     """Mark jobs stuck in 'processing' state as 'failed'."""
