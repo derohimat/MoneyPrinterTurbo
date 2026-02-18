@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import re
@@ -11,6 +12,7 @@ from openai import AzureOpenAI, OpenAI
 from openai.types.chat import ChatCompletion
 
 from app.config import config
+from app.utils import llm_cache
 
 _max_retries = 5
 
@@ -410,6 +412,13 @@ Generate a script for a video, depending on the subject of the video.
     final_script = ""
     logger.info(f"subject: {video_subject}")
 
+    # [I2] Check cache first
+    cached = llm_cache.get("script", subject=video_subject, language=language, paragraphs=paragraph_number)
+    if cached:
+        logger.success(f"[LLM Cache] Returning cached script for '{video_subject}'")
+        return cached
+
+
     def format_response(response):
         # Clean the script
         # Remove asterisks, hashes
@@ -454,6 +463,8 @@ Generate a script for a video, depending on the subject of the video.
         return None
     else:
         logger.success(f"completed: \n{final_script}")
+        # [I2] Store in cache
+        llm_cache.set("script", final_script, subject=video_subject, language=language, paragraphs=paragraph_number)
     return final_script.strip()
 
 
@@ -500,6 +511,15 @@ Please note that you must use English for generating video search terms; Chinese
 
     logger.info(f"subject: {video_subject}")
 
+    # [I2] Check cache first
+    _script_hash = hashlib.md5(video_script.encode()).hexdigest()[:8] if video_script else "none"
+    cached = llm_cache.get("terms", subject=video_subject, script_hash=_script_hash, faceless=use_faceless)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass  # fall through to LLM call
+
     search_terms = []
     response = ""
     for i in range(_max_retries):
@@ -533,6 +553,10 @@ Please note that you must use English for generating video search terms; Chinese
             time.sleep(2 * (i + 1))  # exponential backoff
 
     logger.success(f"completed: \n{search_terms}")
+    # [I2] Store in cache
+    if search_terms:
+        _script_hash = hashlib.md5(video_script.encode()).hexdigest()[:8] if video_script else "none"
+        llm_cache.set("terms", json.dumps(search_terms), subject=video_subject, script_hash=_script_hash, faceless=use_faceless)
     return search_terms
 
 
