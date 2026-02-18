@@ -294,6 +294,10 @@ def generate_final_videos(
             video_transition_mode=video_transition_mode,
             max_clip_duration=params.video_clip_duration,
             threads=params.n_threads,
+            pacing_mode=params.pacing_mode,
+            transition_speed=params.transition_speed,
+            apply_ken_burns=params.apply_ken_burns,
+            color_enhancement=params.color_enhancement,
         )
 
         _progress += 50 / params.video_count / 2

@@ -4,6 +4,7 @@ import os
 import random
 import gc
 import shutil
+import numpy as np
 from typing import List
 from loguru import logger
 from moviepy import (
@@ -20,6 +21,8 @@ from moviepy import (
 )
 from moviepy.video.tools.subtitles import SubtitlesClip
 from PIL import ImageFont
+import imageio_ffmpeg
+
 
 from app.models import const
 from app.models.schema import (
@@ -32,6 +35,7 @@ from app.models.schema import (
 from app.services.utils import video_effects
 from app.utils import utils
 from app.utils import hook_generator
+from app.services.utils import video_effects, pacing, sfx
 
 class SubClippedVideoClip:
     def __init__(self, file_path, start_time=None, end_time=None, width=None, height=None, duration=None):
@@ -125,6 +129,10 @@ def combine_videos(
     video_transition_mode: VideoTransitionMode = None,
     max_clip_duration: int = 5,
     threads: int = 2,
+    pacing_mode: str = "default",
+    transition_speed: float = 0.5,
+    apply_ken_burns: bool = True,
+    color_enhancement: bool = True,
 ) -> str:
     if video_transition_mode is None:
         video_transition_mode = VideoTransitionMode.none
@@ -151,10 +159,19 @@ def combine_videos(
         
         start_time = 0
 
+        # T1-2: Pacing (Variable clip duration)
         while start_time < clip_duration:
-            end_time = min(start_time + max_clip_duration, clip_duration)            
-            if clip_duration - start_time >= 1.5:
-                subclipped_items.append(SubClippedVideoClip(file_path= video_path, start_time=start_time, end_time=end_time, width=clip_w, height=clip_h))
+            if pacing_mode and pacing_mode != "default":
+                segment_duration = pacing.get_clip_duration(pacing_mode)
+            else:
+                segment_duration = max_clip_duration
+
+            end_time = min(start_time + segment_duration, clip_duration)
+            
+            # Allow short clips if they are the tail end (min 1.0s)
+            if end_time - start_time >= 1.0:
+                 subclipped_items.append(SubClippedVideoClip(file_path=video_path, start_time=start_time, end_time=end_time, width=clip_w, height=clip_h))
+            
             start_time = end_time    
             if video_concat_mode.value == VideoConcatMode.sequential.value:
                 break
@@ -175,6 +192,13 @@ def combine_videos(
         try:
             clip = VideoFileClip(subclipped_item.file_path).subclipped(subclipped_item.start_time, subclipped_item.end_time)
             clip_duration = clip.duration
+            
+            # T1-5: Color Enhancement (Auto-normalization/Boost)
+            if color_enhancement:
+                # Apply slight saturation boost and contrast
+                clip = clip.with_effects([vfx.MultiplyColor(1.05)]) # Slight localized brightness/saturation boost
+                # Note: True auto-normalization is expensive. This heuristic improves vibrancy.
+
             # Not all videos are same size, so we need to resize them
             clip_w, clip_h = clip.size
             if clip_w != video_width or clip_h != video_height:
@@ -193,37 +217,82 @@ def combine_videos(
                     new_width = int(clip_w * scale_factor)
                     new_height = int(clip_h * scale_factor)
 
-                    background = ColorClip(size=(video_width, video_height), color=(0, 0, 0)).with_duration(clip_duration)
+                    # T0-1: Use blurred background instead of black bars
+                    try:
+                        from PIL import Image, ImageFilter
+                        bg_clip = clip.resized(new_size=(video_width, video_height))
+                        def blur_frame(get_frame, t):
+                            frame = get_frame(t)
+                            img = Image.fromarray(frame)
+                            blurred = img.filter(ImageFilter.GaussianBlur(radius=30))
+                            return np.array(blurred)
+                        bg_clip = bg_clip.transform(blur_frame).with_duration(clip_duration)
+                    except Exception as blur_err:
+                        logger.warning(f"blur background failed, falling back to black: {blur_err}")
+                        bg_clip = ColorClip(size=(video_width, video_height), color=(0, 0, 0)).with_duration(clip_duration)
+
                     clip_resized = clip.resized(new_size=(new_width, new_height)).with_position("center")
-                    clip = CompositeVideoClip([background, clip_resized])
-                    
+                    clip = CompositeVideoClip([bg_clip, clip_resized])
+            
+            # T1-1: Ken Burns Effect
+            if apply_ken_burns:
+                # Apply to static images or clips where we want dynamic motion
+                # Since we don't know if source is static, we apply subtly to add production value
+                clip = video_effects.ken_burns_effect(clip, zoom_factor=1.1, pan_direction="random")
+
             shuffle_side = random.choice(["left", "right", "top", "bottom"])
             if video_transition_mode.value == VideoTransitionMode.none.value:
                 clip = clip
             elif video_transition_mode.value == VideoTransitionMode.fade_in.value:
-                clip = video_effects.fadein_transition(clip, 1)
+                clip = video_effects.fadein_transition(clip, transition_speed)
             elif video_transition_mode.value == VideoTransitionMode.fade_out.value:
-                clip = video_effects.fadeout_transition(clip, 1)
+                clip = video_effects.fadeout_transition(clip, transition_speed)
             elif video_transition_mode.value == VideoTransitionMode.slide_in.value:
-                clip = video_effects.slidein_transition(clip, 1, shuffle_side)
+                clip = video_effects.slidein_transition(clip, transition_speed, shuffle_side)
             elif video_transition_mode.value == VideoTransitionMode.slide_out.value:
-                clip = video_effects.slideout_transition(clip, 1, shuffle_side)
+                clip = video_effects.slideout_transition(clip, transition_speed, shuffle_side)
+            elif video_transition_mode.value == VideoTransitionMode.whip_pan.value:
+                clip = video_effects.whip_pan_transition(clip, transition_speed)
+            elif video_transition_mode.value == VideoTransitionMode.zoom.value:
+                clip = video_effects.zoom_transition(clip, transition_speed)
             elif video_transition_mode.value == VideoTransitionMode.shuffle.value:
                 transition_funcs = [
-                    lambda c: video_effects.fadein_transition(c, 1),
-                    lambda c: video_effects.fadeout_transition(c, 1),
-                    lambda c: video_effects.slidein_transition(c, 1, shuffle_side),
-                    lambda c: video_effects.slideout_transition(c, 1, shuffle_side),
+                    lambda c: video_effects.fadein_transition(c, transition_speed),
+                    lambda c: video_effects.fadeout_transition(c, transition_speed),
+                    lambda c: video_effects.slidein_transition(c, transition_speed, shuffle_side),
+                    lambda c: video_effects.slideout_transition(c, transition_speed, shuffle_side),
+                    lambda c: video_effects.whip_pan_transition(c, transition_speed),
+                    lambda c: video_effects.zoom_transition(c, transition_speed),
                 ]
                 shuffle_transition = random.choice(transition_funcs)
                 clip = shuffle_transition(clip)
 
-            if clip.duration > max_clip_duration:
-                clip = clip.subclipped(0, max_clip_duration)
-                
-            # wirte clip to temp file
+            # T3-3: Auto-SFX on transition
+            # Remove original audio (stock noise)
+            clip = clip.without_audio()
+            
+            # Add SFX if transition occurred (simple check: mode is not None)
+            if video_transition_mode and video_transition_mode != VideoTransitionMode.none:
+                sfx_file = sfx.get_random_transition_sfx()
+                if sfx_file:
+                    try:
+                        sfx_audio = AudioFileClip(sfx_file)
+                        # Ensure SFX doesn't exceed clip duration (though rare for short SFX)
+                        if sfx_audio.duration > clip.duration:
+                             sfx_audio = sfx_audio.subclipped(0, clip.duration)
+                        
+                        # Set audio (replaces existing, which is None/Silent now)
+                        clip = clip.with_audio(sfx_audio)
+                    except Exception as sfx_err:
+                         logger.warning(f"failed to add sfx: {sfx_err}")
+
+            # T1-2: Pacing logic guarantees duration, but if filters changed it, ensure it's correct
+            # Wait, Ken Burns uses transform which preserves duration. Transitions might add effects.
+            # No clipping needed unless duration grew unexpectedly.
+            
+            # write clip to temp file (T0-2: bitrate control)
             clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
-            clip.write_videofile(clip_file, logger=None, fps=fps, codec=video_codec)
+            clip.write_videofile(clip_file, logger=None, fps=fps, codec=video_codec, bitrate="8000k")
             
             close_clip(clip)
         
@@ -244,8 +313,10 @@ def combine_videos(
             video_duration += clip.duration
         logger.info(f"video duration: {video_duration:.2f}s, audio duration: {audio_duration:.2f}s, looped {len(processed_clips)-len(base_clips)} clips")
      
-    # merge video clips progressively, avoid loading all videos at once to avoid memory overflow
-    logger.info("starting clip merging process")
+    # T0-4: One-pass concatenation using FFmpeg concat demuxer
+    # Instead of iteratively merging clips (N-1 re-encodes = quality loss),
+    # use FFmpeg's concat demuxer for a single-pass merge.
+    logger.info(f"starting one-pass clip merge ({len(processed_clips)} clips)")
     if not processed_clips:
         logger.error("no clips available for merging")
         raise ValueError("No valid video clips were processed successfully. Check if download failed or files are corrupted.")
@@ -254,56 +325,57 @@ def combine_videos(
     if len(processed_clips) == 1:
         logger.info("using single clip directly")
         shutil.copy(processed_clips[0].file_path, combined_video_path)
-        delete_files(processed_clips)
+        delete_files([processed_clips[0].file_path])
         logger.info("video combining completed")
         return combined_video_path
     
-    # create initial video file as base
-    base_clip_path = processed_clips[0].file_path
-    temp_merged_video = f"{output_dir}/temp-merged-video.mp4"
-    temp_merged_next = f"{output_dir}/temp-merged-next.mp4"
+    # Write concat list file for FFmpeg
+    concat_list_path = f"{output_dir}/concat_list.txt"
+    with open(concat_list_path, "w", encoding="utf-8") as f:
+        for clip in processed_clips:
+            # FFmpeg concat demuxer requires forward slashes and escaped quotes
+            safe_path = clip.file_path.replace("\\", "/")
+            f.write(f"file '{safe_path}'\n")
     
-    # copy first clip as initial merged video
-    shutil.copy(base_clip_path, temp_merged_video)
-    
-    # merge remaining video clips one by one
-    for i, clip in enumerate(processed_clips[1:], 1):
-        logger.info(f"merging clip {i}/{len(processed_clips)-1}, duration: {clip.duration:.2f}s")
-        
-        try:
-            # load current base video and next clip to merge
-            base_clip = VideoFileClip(temp_merged_video)
-            next_clip = VideoFileClip(clip.file_path)
-            
-            # merge these two clips
-            merged_clip = concatenate_videoclips([base_clip, next_clip])
-
-            # save merged result to temp file
-            merged_clip.write_videofile(
-                filename=temp_merged_next,
+    # Single-pass merge via FFmpeg concat demuxer (stream copy = no re-encode)
+    import subprocess
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    try:
+        ffmpeg_cmd = [
+            ffmpeg_exe, "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_list_path,
+            "-c", "copy",
+            combined_video_path,
+        ]
+        logger.info(f"running FFmpeg concat: {' '.join(ffmpeg_cmd)}")
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            logger.warning(f"FFmpeg concat failed (rc={result.returncode}): {result.stderr[:500]}")
+            logger.info("falling back to moviepy concatenation")
+            # Fallback: load all clips and concat via moviepy (single write)
+            all_clips = [VideoFileClip(c.file_path) for c in processed_clips]
+            merged = concatenate_videoclips(all_clips)
+            merged.write_videofile(
+                combined_video_path,
                 threads=threads,
                 logger=None,
                 temp_audiofile_path=output_dir,
                 audio_codec=audio_codec,
                 fps=fps,
+                bitrate="8000k",
             )
-            close_clip(base_clip)
-            close_clip(next_clip)
-            close_clip(merged_clip)
-            
-            # replace base file with new merged file
-            delete_files(temp_merged_video)
-            os.rename(temp_merged_next, temp_merged_video)
-            
-        except Exception as e:
-            logger.error(f"failed to merge clip: {str(e)}")
-            continue
-    
-    # after merging, rename final result to target file name
-    os.rename(temp_merged_video, combined_video_path)
+            for c in all_clips:
+                close_clip(c)
+            close_clip(merged)
+    except Exception as e:
+        logger.error(f"one-pass merge failed: {str(e)}")
+        raise
     
     # clean temp files
     clip_files = [clip.file_path for clip in processed_clips]
+    clip_files.append(concat_list_path)
     delete_files(clip_files)
             
     logger.info("video combining completed")
@@ -421,10 +493,16 @@ def generate_video(
         _clip = _clip.with_start(subtitle_item[0][0])
         _clip = _clip.with_end(subtitle_item[0][1])
         _clip = _clip.with_duration(duration)
+        # T0-5: Platform-aware safe zone positioning
+        from app.utils.safe_zones import get_safe_subtitle_y
+        target_platform = getattr(params, "target_platform", "default") or "default"
+        
         if params.subtitle_position == "bottom":
-            _clip = _clip.with_position(("center", video_height * 0.95 - _clip.h))
+            safe_y = get_safe_subtitle_y(video_height, _clip.h, "bottom", target_platform)
+            _clip = _clip.with_position(("center", safe_y))
         elif params.subtitle_position == "top":
-            _clip = _clip.with_position(("center", video_height * 0.05))
+            safe_y = get_safe_subtitle_y(video_height, _clip.h, "top", target_platform)
+            _clip = _clip.with_position(("center", safe_y))
         elif params.subtitle_position == "custom":
             # Ensure the subtitle is fully within the screen bounds
             margin = 10  # Additional margin, in pixels
@@ -439,9 +517,9 @@ def generate_video(
             _clip = _clip.with_position(("center", "center"))
         return _clip
 
-    video_clip = VideoFileClip(video_path).without_audio()
+    video_clip = VideoFileClip(video_path) # Keep audio (SFX from combine_videos)
     audio_clip = AudioFileClip(audio_path).with_effects(
-        [afx.MultiplyVolume(params.voice_volume)]
+        [afx.AudioNormalize(), afx.MultiplyVolume(params.voice_volume)]
     )
 
     def make_textclip(text):
@@ -461,21 +539,37 @@ def generate_video(
             text_clips.append(clip)
         video_clip = CompositeVideoClip([video_clip, *text_clips])
 
+    # Audio Mixing: Voice + BGM + SFX
+    audio_source = [audio_clip] # Start with normalized voice
+    
+    # 1. Add SFX (from video track) if present
+    if video_clip.audio:
+        audio_source.append(video_clip.audio)
+
+    # 2. Add BGM if configured
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
     if bgm_file:
         try:
             bgm_clip = AudioFileClip(bgm_file).with_effects(
                 [
                     afx.MultiplyVolume(params.bgm_volume),
+                    afx.AudioFadeIn(2),   # T0-3: BGM fade-in over 2 seconds
                     afx.AudioFadeOut(3),
                     afx.AudioLoop(duration=video_clip.duration),
                 ]
             )
-            audio_clip = CompositeAudioClip([audio_clip, bgm_clip])
+            audio_source.append(bgm_clip)
         except Exception as e:
             logger.error(f"failed to add bgm: {str(e)}")
 
-    video_clip = video_clip.with_audio(audio_clip)
+    # Composite audio
+    try:
+        final_audio = CompositeAudioClip(audio_source)
+        video_clip = video_clip.with_audio(final_audio)
+    except Exception as e:
+        logger.error(f"failed to composite audio: {str(e)}")
+        # Fallback to just voice if mix fails
+        video_clip = video_clip.with_audio(audio_clip)
 
     # Watermark overlay
     watermark_clip = None
@@ -563,6 +657,7 @@ def generate_video(
     if len(overlay_clips) > 1:
         video_clip = CompositeVideoClip(overlay_clips)
 
+    # T0-2: bitrate control for final output
     video_clip.write_videofile(
         output_file,
         audio_codec=audio_codec,
@@ -570,6 +665,7 @@ def generate_video(
         threads=params.n_threads or 2,
         logger=None,
         fps=fps,
+        bitrate="8000k",
     )
     video_clip.close()
     del video_clip

@@ -25,6 +25,8 @@ class VideoTransitionMode(str, Enum):
     fade_out = "FadeOut"
     slide_in = "SlideIn"
     slide_out = "SlideOut"
+    whip_pan = "WhipPan"
+    zoom = "Zoom"
 
 
 class VideoAspect(str, Enum):
@@ -98,6 +100,12 @@ class VideoParams(BaseModel):
     subtitle_position: Optional[str] = "bottom"  # top, bottom, center
     custom_position: float = 70.0
     font_name: Optional[str] = "STHeitiMedium.ttc"
+
+    # TIER 1: Visual Quality Params
+    pacing_mode: Optional[str] = "dynamic"  # fast, slow, dynamic
+    transition_speed: Optional[float] = 0.5
+    apply_ken_burns: Optional[bool] = True
+    color_enhancement: Optional[bool] = True
     text_fore_color: Optional[str] = "#FFFFFF"
     text_background_color: Union[bool, str] = True
 
@@ -123,6 +131,9 @@ class VideoParams(BaseModel):
 
     # Faceless Mode settings
     use_faceless: Optional[bool] = False
+
+    # T0-5: Target platform for safe zone awareness
+    target_platform: Optional[str] = "default"  # youtube_shorts, tiktok, instagram_reels, default
 
 
 class SubtitleRequest(BaseModel):

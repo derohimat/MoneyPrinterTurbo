@@ -42,3 +42,7 @@ tasks_*.json
 test_*.log
 test_video_gen.py
 batch_run_category.py
+# Test artifacts
+output_tier1/
+*.temp.mp3
+*.temp.wav
