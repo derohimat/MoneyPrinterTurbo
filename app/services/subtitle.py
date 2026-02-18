@@ -190,9 +190,37 @@ def similarity(a, b):
     return 1 - (distance / max_length)
 
 
-def correct(subtitle_file, video_script):
+def _srt_time_to_seconds(srt_time: str) -> float:
+    """Convert SRT timestamp '00:01:23,456' to seconds."""
+    try:
+        h, m, rest = srt_time.strip().split(":")
+        s, ms = rest.split(",")
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+    except Exception:
+        return 0.0
+
+
+def _seconds_to_srt_time(seconds: float) -> str:
+    """Convert seconds to SRT timestamp '00:01:23,456'."""
+    seconds = max(0.0, seconds)
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds - int(seconds)) * 1000))
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def correct(subtitle_file, video_script, audio_duration: float = 0.0):
+    """
+    [N1] Improved subtitle correction with:
+    1. Proportional timing redistribution when script lines don't match Whisper segments.
+    2. Global drift correction — scale all timestamps if they end too early.
+    """
     subtitle_items = file_to_subtitles(subtitle_file)
     script_lines = utils.split_string_by_punctuations(video_script)
+
+    if not subtitle_items or not script_lines:
+        return
 
     corrected = False
     new_subtitle_items = []
@@ -208,9 +236,10 @@ def correct(subtitle_file, video_script):
             script_index += 1
             subtitle_index += 1
         else:
+            # Try to find the best matching window of subtitle segments
             combined_subtitle = subtitle_line
-            start_time = subtitle_items[subtitle_index][1].split(" --> ")[0]
-            end_time = subtitle_items[subtitle_index][1].split(" --> ")[1]
+            start_time_str = subtitle_items[subtitle_index][1].split(" --> ")[0]
+            end_time_str = subtitle_items[subtitle_index][1].split(" --> ")[1]
             next_subtitle_index = subtitle_index + 1
 
             while next_subtitle_index < len(subtitle_items):
@@ -219,61 +248,100 @@ def correct(subtitle_file, video_script):
                     script_line, combined_subtitle + " " + next_subtitle
                 ) > similarity(script_line, combined_subtitle):
                     combined_subtitle += " " + next_subtitle
-                    end_time = subtitle_items[next_subtitle_index][1].split(" --> ")[1]
+                    end_time_str = subtitle_items[next_subtitle_index][1].split(" --> ")[1]
                     next_subtitle_index += 1
                 else:
                     break
 
-            if similarity(script_line, combined_subtitle) > 0.8:
-                logger.warning(
-                    f"Merged/Corrected - Script: {script_line}, Subtitle: {combined_subtitle}"
-                )
-                new_subtitle_items.append(
-                    (
+            # [N1] Proportional timing: if multiple script lines map to this time window,
+            # distribute the time proportionally by character count.
+            window_start = _srt_time_to_seconds(start_time_str)
+            window_end = _srt_time_to_seconds(end_time_str)
+            window_duration = window_end - window_start
+
+            # Collect all remaining script lines that fit in this window
+            remaining_script = script_lines[script_index:]
+            # Estimate how many script lines fit (by similarity to combined_subtitle)
+            chars_in_window = len(combined_subtitle)
+            chars_so_far = 0
+            lines_in_window = []
+            for sl in remaining_script:
+                sl = sl.strip()
+                if not sl:
+                    continue
+                lines_in_window.append(sl)
+                chars_so_far += len(sl)
+                if chars_so_far >= chars_in_window * 0.9:
+                    break
+
+            if len(lines_in_window) > 1 and window_duration > 0:
+                # Distribute time proportionally by character count
+                total_chars = sum(len(l) for l in lines_in_window)
+                t = window_start
+                for sl in lines_in_window:
+                    proportion = len(sl) / total_chars if total_chars > 0 else 1 / len(lines_in_window)
+                    line_duration = window_duration * proportion
+                    line_end = min(t + line_duration, window_end)
+                    new_subtitle_items.append((
                         len(new_subtitle_items) + 1,
-                        f"{start_time} --> {end_time}",
-                        script_line,
-                    )
-                )
+                        f"{_seconds_to_srt_time(t)} --> {_seconds_to_srt_time(line_end)}",
+                        sl,
+                    ))
+                    t = line_end
+                    script_index += 1
                 corrected = True
             else:
-                logger.warning(
-                    f"Mismatch - Script: {script_line}, Subtitle: {combined_subtitle}"
-                )
-                new_subtitle_items.append(
-                    (
-                        len(new_subtitle_items) + 1,
-                        f"{start_time} --> {end_time}",
-                        script_line,
-                    )
-                )
+                # Single line — use the full window
+                new_subtitle_items.append((
+                    len(new_subtitle_items) + 1,
+                    f"{start_time_str} --> {end_time_str}",
+                    script_line,
+                ))
+                script_index += 1
                 corrected = True
 
-            script_index += 1
             subtitle_index = next_subtitle_index
 
-    # Process the remaining lines of the script.
+    # Handle remaining script lines
     while script_index < len(script_lines):
-        logger.warning(f"Extra script line: {script_lines[script_index]}")
+        sl = script_lines[script_index].strip()
+        logger.warning(f"Extra script line: {sl}")
         if subtitle_index < len(subtitle_items):
-            new_subtitle_items.append(
-                (
-                    len(new_subtitle_items) + 1,
-                    subtitle_items[subtitle_index][1],
-                    script_lines[script_index],
-                )
-            )
+            new_subtitle_items.append((
+                len(new_subtitle_items) + 1,
+                subtitle_items[subtitle_index][1],
+                sl,
+            ))
             subtitle_index += 1
         else:
-            new_subtitle_items.append(
-                (
-                    len(new_subtitle_items) + 1,
-                    "00:00:00,000 --> 00:00:00,000",
-                    script_lines[script_index],
-                )
-            )
+            new_subtitle_items.append((
+                len(new_subtitle_items) + 1,
+                "00:00:00,000 --> 00:00:00,000",
+                sl,
+            ))
         script_index += 1
         corrected = True
+
+    # [N1] Global drift correction: if audio_duration is known and last subtitle
+    # ends significantly before it, scale all timestamps proportionally.
+    if audio_duration > 0 and new_subtitle_items:
+        last_time_str = new_subtitle_items[-1][1].split(" --> ")[1]
+        last_end = _srt_time_to_seconds(last_time_str)
+        if last_end > 0 and abs(last_end - audio_duration) / audio_duration > 0.1:
+            scale = audio_duration / last_end
+            logger.info(f"[N1] Applying timing drift correction: scale={scale:.3f} (last={last_end:.1f}s, audio={audio_duration:.1f}s)")
+            scaled_items = []
+            for idx, item in enumerate(new_subtitle_items):
+                parts = item[1].split(" --> ")
+                t_start = _srt_time_to_seconds(parts[0]) * scale
+                t_end = _srt_time_to_seconds(parts[1]) * scale
+                scaled_items.append((
+                    idx + 1,
+                    f"{_seconds_to_srt_time(t_start)} --> {_seconds_to_srt_time(t_end)}",
+                    item[2],
+                ))
+            new_subtitle_items = scaled_items
+            corrected = True
 
     if corrected:
         with open(subtitle_file, "w", encoding="utf-8") as fd:
