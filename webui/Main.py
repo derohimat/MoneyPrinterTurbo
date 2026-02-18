@@ -580,10 +580,17 @@ with left_panel:
                 else:
                     st.session_state["video_terms"] = ", ".join(terms)
 
-        params.video_terms = st.text_area(
-            tr("Video Keywords"), value=st.session_state["video_terms"]
+        video_terms = st.text_area(
+            tr("Video Keywords"),
+            value=params.video_terms,
+            help=tr("Leave empty to auto-generate from script"),
         )
+        
+        # Faceless Mode
+        use_faceless = st.checkbox(tr("Faceless Content Mode"), value=False, help=tr("Avoid showing people's faces. Focus on hands, objects, and scenery."))
+        params.use_faceless = use_faceless
 
+        params.video_terms = video_terms
 with middle_panel:
     with st.container(border=True):
         st.write(tr("Video Settings"))

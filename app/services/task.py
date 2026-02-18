@@ -42,7 +42,10 @@ def generate_terms(task_id, params, video_script):
     video_terms = params.video_terms
     if not video_terms:
         video_terms = llm.generate_terms(
-            video_subject=params.video_subject, video_script=video_script, amount=5
+            video_subject=params.video_subject,
+            video_script=video_script,
+            amount=5,
+            use_faceless=params.use_faceless,
         )
     else:
         if isinstance(video_terms, str):
@@ -325,17 +328,51 @@ def generate_final_videos(
 
 
 def start(task_id, params: VideoParams, stop_at: str = "video"):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
 
-    # Apply safety filters if negative terms are not explicitly provided
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 0: PRE-FLIGHT VALIDATION
+    # Consolidate ALL negative terms BEFORE any LLM calls so they can influence
+    # the prompt and we fail fast if config is missing.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # 0a. Normalize params
+    if type(params.video_concat_mode) is str:
+        params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
+
+    # 0b. Consolidate negative terms: safety + faceless
     if not params.video_negative_terms:
         params.video_negative_terms = safety_filters.get_negative_terms(params.video_subject)
         logger.info(f"Auto-applied safety negative terms: {params.video_negative_terms}")
 
+    if params.use_faceless:
+        faceless_negatives = ["face", "portrait", "looking at camera", "talking head", "selfie", "woman face", "man face"]
+        if isinstance(params.video_negative_terms, list):
+            params.video_negative_terms = list(set(params.video_negative_terms + faceless_negatives))
+        elif isinstance(params.video_negative_terms, str):
+            params.video_negative_terms += "," + ",".join(faceless_negatives)
+        else:
+            params.video_negative_terms = faceless_negatives
+        logger.info(f"Faceless Mode active. Negative terms: {params.video_negative_terms}")
+
+    # 0c. Validate API keys early (only for non-local sources)
+    if params.video_source not in ("local",):
+        try:
+            from app.services.material import get_api_key
+            get_api_key(f"{params.video_source}_api_keys")
+        except ValueError as e:
+            logger.error(f"Pre-flight check failed: {e}")
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            return
+
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
 
-    if type(params.video_concat_mode) is str:
-        params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 1: CONTENT GENERATION (LLM)
+    # ─────────────────────────────────────────────────────────────────────────
 
     # 1. Generate script
     video_script = generate_script(task_id, params)
@@ -351,7 +388,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         )
         return {"script": video_script}
 
-    # 2. Generate terms
+    # 2. Generate search terms
     video_terms = ""
     if params.video_source != "local":
         video_terms = generate_terms(task_id, params, video_script)
@@ -369,15 +406,47 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
 
-    # 3. Generate audio
-    audio_file, audio_duration, sub_maker = generate_audio(
-        task_id, params, video_script
-    )
-    if not audio_file:
-        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
-        return
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 2: PARALLEL EXECUTION — Audio TTS + Material Download
+    # These two are completely independent; run them concurrently to save time.
+    # ─────────────────────────────────────────────────────────────────────────
+    audio_file = audio_duration = sub_maker = None
+    downloaded_videos = None
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
+    def _run_audio():
+        return generate_audio(task_id, params, video_script)
+
+    def _run_materials():
+        return get_video_materials(task_id, params, video_terms, 9999)  # placeholder duration
+
+    if stop_at in ("audio", "subtitle", "materials", "video"):
+        logger.info("## [PARALLEL] Starting audio generation + material download concurrently...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_audio = executor.submit(_run_audio)
+            future_materials = executor.submit(_run_materials) if params.video_source != "local" else None
+
+            # Collect audio result
+            audio_file, audio_duration, sub_maker = future_audio.result()
+            if not audio_file:
+                sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+                return
+
+            # Collect materials result
+            if future_materials is not None:
+                downloaded_videos = future_materials.result()
+            else:
+                # Local source: process synchronously (needs audio_duration)
+                downloaded_videos = get_video_materials(task_id, params, video_terms, audio_duration)
+
+            if not downloaded_videos:
+                sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+                return
+
+        sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
+        logger.info(f"## [PARALLEL] Audio ({audio_duration}s) + {len(downloaded_videos)} materials ready.")
+    else:
+        # stop_at == "script" or "terms" handled above; shouldn't reach here
+        return
 
     if stop_at == "audio":
         sm.state.update_task(
@@ -388,10 +457,21 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         )
         return {"audio_file": audio_file, "audio_duration": audio_duration}
 
-    # 4. Generate subtitle
-    subtitle_path = generate_subtitle(
-        task_id, params, video_script, sub_maker, audio_file
-    )
+    if stop_at == "materials":
+        sm.state.update_task(
+            task_id,
+            state=const.TASK_STATE_COMPLETE,
+            progress=100,
+            materials=downloaded_videos,
+        )
+        return {"materials": downloaded_videos}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 3: ASSEMBLY — Subtitle + Final Video
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # 4. Generate subtitle (requires audio)
+    subtitle_path = generate_subtitle(task_id, params, video_script, sub_maker, audio_file)
 
     if stop_at == "subtitle":
         sm.state.update_task(
@@ -402,28 +482,9 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         )
         return {"subtitle_path": subtitle_path}
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
-
-    # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id, params, video_terms, audio_duration
-    )
-    if not downloaded_videos:
-        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
-        return
-
-    if stop_at == "materials":
-        sm.state.update_task(
-            task_id,
-            state=const.TASK_STATE_COMPLETE,
-            progress=100,
-            materials=downloaded_videos,
-        )
-        return {"materials": downloaded_videos}
-
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=50)
 
-    # 6. Generate final videos
+    # 5. Generate final videos
     final_video_paths, combined_video_paths = generate_final_videos(
         task_id, params, downloaded_videos, audio_file, subtitle_path
     )
@@ -436,31 +497,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         f"task {task_id} finished, generated {len(final_video_paths)} videos."
     )
 
-    # 7. Generate YouTube metadata
-    try:
-        metadata = metadata_gen.generate_youtube_metadata(
-            video_subject=params.video_subject,
-            video_script=video_script,
-            output_dir=utils.task_dir(task_id),
-        )
-        if metadata:
-            logger.info(f"YouTube metadata generated for task {task_id}")
-    except Exception as e:
-        logger.warning(f"Metadata generation failed (non-critical): {str(e)}")
-
-    # 8. Generate thumbnail
-    try:
-        if final_video_paths:
-            thumb_path = thumbnail.generate_thumbnail(
-                video_path=final_video_paths[0],
-                title=params.video_subject,
-                output_path=os.path.join(utils.task_dir(task_id), "thumbnail.jpg"),
-            )
-            if thumb_path:
-                logger.info(f"Thumbnail generated for task {task_id}")
-    except Exception as e:
-        logger.warning(f"Thumbnail generation failed (non-critical): {str(e)}")
-
+    # Mark task complete immediately so user can see the video
     kwargs = {
         "videos": final_video_paths,
         "combined_videos": combined_video_paths,
@@ -474,6 +511,41 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
     )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 4: NON-BLOCKING POST-PROCESSING (background thread)
+    # Metadata and thumbnail are non-critical; run them after task is marked done.
+    # ─────────────────────────────────────────────────────────────────────────
+    def _post_process():
+        # 7. Generate YouTube metadata
+        try:
+            metadata = metadata_gen.generate_youtube_metadata(
+                video_subject=params.video_subject,
+                video_script=video_script,
+                output_dir=utils.task_dir(task_id),
+            )
+            if metadata:
+                logger.info(f"YouTube metadata generated for task {task_id}")
+        except Exception as e:
+            logger.warning(f"Metadata generation failed (non-critical): {str(e)}")
+
+        # 8. Generate thumbnail
+        try:
+            if final_video_paths:
+                thumb_path = thumbnail.generate_thumbnail(
+                    video_path=final_video_paths[0],
+                    title=params.video_subject,
+                    output_path=os.path.join(utils.task_dir(task_id), "thumbnail.jpg"),
+                )
+                if thumb_path:
+                    logger.info(f"Thumbnail generated for task {task_id}")
+        except Exception as e:
+            logger.warning(f"Thumbnail generation failed (non-critical): {str(e)}")
+
+    post_thread = threading.Thread(target=_post_process, daemon=True)
+    post_thread.start()
+    logger.info("Post-processing (metadata + thumbnail) started in background.")
+
     return kwargs
 
 

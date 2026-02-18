@@ -457,7 +457,16 @@ Generate a script for a video, depending on the subject of the video.
     return final_script.strip()
 
 
-def generate_terms(video_subject: str, video_script: str, amount: int = 5) -> List[str]:
+def generate_terms(video_subject: str, video_script: str, amount: int = 5, use_faceless: bool = False) -> List[str]:
+    faceless_instruction = ""
+    if use_faceless:
+        faceless_instruction = """
+7. **FACELESS MODE ACTIVE**: 
+   - STRICTLY AVOID terms that imply a person's face (e.g., "portrait", "face", "looking at camera", "talking head").
+   - Focus on: "hands doing x", "back view of person", "over the shoulder shot", "close up of objects", "scenery", "environment".
+   - If the subject requires a person, use "silhouette", "shadow", "body part only".
+"""
+
     prompt = f"""
 # Role: Video Search Terms Generator
 
@@ -473,6 +482,7 @@ Generate {amount} highly specific search terms for stock videos, based on the vi
 4. Avoid generic words like "video", "footage", "4k", "hd", "scene".
 5. Reply with English search terms only.
 6. All search terms must be safe and appropriate for children.
+{faceless_instruction}
 
 ## Output Example:
 ["{video_subject} celebration dinner", "{video_subject} traditional clothes", "{video_subject} praying", "{video_subject} family gathering"]

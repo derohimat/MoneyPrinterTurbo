@@ -27,7 +27,7 @@ VOICE_NAME = "en-US-ChristopherNeural"
 root_dir = os.path.dirname(os.path.abspath(__file__))
 
 
-def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False, resume_mode=False, use_veo=False, veo_prompt_template="", veo_negative_prompt="", veo_resolution="1080p", veo_auto_prompt=False):
+def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False, resume_mode=False, use_veo=False, veo_prompt_template="", veo_negative_prompt="", veo_resolution="1080p", veo_auto_prompt=False, use_faceless=False):
     logger.remove()
     logger.add(sys.stderr, level="DEBUG")
 
@@ -191,7 +191,8 @@ def run_batch(json_file, category_arg=None, delay_seconds=0, force_rebuild=False
             veo_prompt_template=veo_prompt_template,
             veo_negative_prompt=veo_negative_prompt,
             veo_resolution=veo_resolution,
-            veo_auto_prompt=veo_auto_prompt
+            veo_auto_prompt=veo_auto_prompt,
+            use_faceless=use_faceless
         )
 
         # Insert job to DB
@@ -261,10 +262,16 @@ if __name__ == "__main__":
     parser.add_argument('--veo-negative', help='Veo negative prompt', default="")
     parser.add_argument('--veo-resolution', help='Veo resolution', default="1080p")
     parser.add_argument('--veo-auto-prompt', action='store_true', help='Auto-generate Veo prompts using LLM')
+    parser.add_argument("--faceless", action="store_true", help="Enable Faceless Content Mode") # New arg
     args = parser.parse_args()
     
+    if args.delay > 0:
+        logger.info(f"Delaying start for {args.delay} seconds...")
+        import time
+        time.sleep(args.delay)
+
     run_batch(
-        args.json_file, 
+        json_file=args.json_file, 
         category_arg=args.category, 
         delay_seconds=args.delay, 
         force_rebuild=args.force, 
@@ -273,5 +280,6 @@ if __name__ == "__main__":
         veo_prompt_template=args.veo_prompt,
         veo_negative_prompt=args.veo_negative,
         veo_resolution=args.veo_resolution,
-        veo_auto_prompt=args.veo_auto_prompt
+        veo_auto_prompt=args.veo_auto_prompt,
+        use_faceless=args.faceless
     )

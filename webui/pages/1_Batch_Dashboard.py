@@ -103,33 +103,36 @@ with st.sidebar:
                  config.save_config()
              veo_auto_prompt = auto_prompt_val
              
-             if not veo_auto_prompt:
-                 prompt_val = st.text_area(tr("Veo Prompt Template"), value=veo_config.get("prompt_template", "Cinematic shot of {subject}, 8k resolution, highly detailed"), help="Use {subject} as placeholder")
-                 if prompt_val != veo_config.get("prompt_template", ""):
-                     config.veo["prompt_template"] = prompt_val
-                     config.save_config()
-                 veo_prompt_template = prompt_val
-
-                 neg_val = st.text_input(tr("Negative Prompt"), value=veo_config.get("negative_prompt", ""), help="What to avoid (if supported)")
-                 if neg_val != veo_config.get("negative_prompt", ""):
-                     config.veo["negative_prompt"] = neg_val
-                     config.save_config()
-                 veo_negative_prompt = neg_val
-             else:
-                 st.info(tr("Prompts will be auto-generated during processing."))
-                 
-             res_options = ["1080p", "Landscape (16:9)", "Portrait (9:16)"]
-             default_res = veo_config.get("resolution", "1080p")
-             try:
-                 res_index = res_options.index(default_res)
-             except ValueError:
-                 res_index = 0
-                 
-             res_val = st.selectbox(tr("Resolution / Aspect"), res_options, index=res_index)
-             if res_val != default_res:
-                 config.veo["resolution"] = res_val
+        # Faceless Mode
+        use_faceless = st.checkbox(tr("Faceless Content Mode"), value=False, help=tr("Avoid showing people's faces. Focus on hands, objects, and scenery."))
+             
+        if not veo_auto_prompt:
+             prompt_val = st.text_area(tr("Veo Prompt Template"), value=veo_config.get("prompt_template", "Cinematic shot of {subject}, 8k resolution, highly detailed"), help="Use {subject} as placeholder")
+             if prompt_val != veo_config.get("prompt_template", ""):
+                 config.veo["prompt_template"] = prompt_val
                  config.save_config()
-             veo_resolution = res_val
+             veo_prompt_template = prompt_val
+
+             neg_val = st.text_input(tr("Negative Prompt"), value=veo_config.get("negative_prompt", ""), help="What to avoid (if supported)")
+             if neg_val != veo_config.get("negative_prompt", ""):
+                 config.veo["negative_prompt"] = neg_val
+                 config.save_config()
+             veo_negative_prompt = neg_val
+        else:
+             st.info(tr("Prompts will be auto-generated during processing."))
+             
+        res_options = ["1080p", "Landscape (16:9)", "Portrait (9:16)"]
+        default_res = veo_config.get("resolution", "1080p")
+        try:
+             res_index = res_options.index(default_res)
+        except ValueError:
+             res_index = 0
+             
+        res_val = st.selectbox(tr("Resolution / Aspect"), res_options, index=res_index)
+        if res_val != default_res:
+             config.veo["resolution"] = res_val
+             config.save_config()
+        veo_resolution = res_val
 
         if not veo_config.get("project_id"):
              st.warning("Veo is enabled but 'project_id' is missing in config.toml")
@@ -145,6 +148,9 @@ with st.sidebar:
             cmd = [python_exe, os.path.join(root_dir, "batch_run_category.py"), selected_file]
             if category_input:
                 cmd.extend(["--category", category_input])
+            
+            if use_faceless:
+                cmd.append("--faceless")
             
             if force_rebuild:
                 cmd.append("--force")

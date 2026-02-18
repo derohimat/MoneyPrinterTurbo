@@ -121,6 +121,9 @@ class VideoParams(BaseModel):
     veo_resolution: Optional[str] = "1080p" # 1080p, 720p, etc. (mapped to aspect ratio if needed)
     veo_auto_prompt: Optional[bool] = False
 
+    # Faceless Mode settings
+    use_faceless: Optional[bool] = False
+
 
 class SubtitleRequest(BaseModel):
     video_script: str
