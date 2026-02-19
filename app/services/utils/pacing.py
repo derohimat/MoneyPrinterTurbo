@@ -7,28 +7,42 @@ class PacingMode(Enum):
     DYNAMIC = "dynamic"
     DEFAULT = "default"
 
-def get_clip_duration(mode: str = "default") -> float:
+def get_clip_duration(mode: str = "default", current_time: float = 0, total_duration: float = 60) -> float:
     """
-    Get a duration for the next clip based on the pacing mode.
+    Get a duration for the next clip based on pacing mode and position in timeline.
     
     Args:
         mode: The pacing mode (fast, slow, dynamic, default)
+        current_time: Current timestamp in the video timeline (for dynamic pacing)
+        total_duration: Total expected duration of the video (for dynamic pacing)
         
     Returns:
         float: Duration in seconds
     """
+    min_dur = 2.0
+    max_dur = 4.0
+
     if mode == PacingMode.FAST.value:
-        return random.uniform(1.5, 3.0)
+        min_dur, max_dur = 1.5, 3.0
     elif mode == PacingMode.SLOW.value:
-        return random.uniform(3.0, 5.0)
+        min_dur, max_dur = 3.0, 5.0
     elif mode == PacingMode.DYNAMIC.value:
-        # 70% chance of fast cut, 30% chance of slow cut
-        if random.random() < 0.7:
-             return random.uniform(1.5, 2.5)
+        # Pacing Curve: Fast Start -> Slower Middle -> Fast End
+        if total_duration > 0:
+            progress = current_time / total_duration
         else:
-             return random.uniform(3.0, 4.5)
+            progress = 0
+            
+        # First 20% and Last 20%: Fast
+        if progress < 0.20 or progress > 0.80:
+             min_dur, max_dur = 1.0, 2.5
+        else:
+             # Middle: Mixed/Slower
+             min_dur, max_dur = 2.5, 5.0
     else: # Default
-        return random.uniform(2.0, 4.0)
+        min_dur, max_dur = 2.0, 4.0
+        
+    return random.uniform(min_dur, max_dur)
 
 def get_pacing_mode(video_subject: str = "") -> str:
     """Determine pacing mode based on subject (heuristic) or default."""

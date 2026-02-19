@@ -36,7 +36,7 @@ from app.models.schema import (
 )
 from app.services.utils import video_effects
 from app.utils import utils
-from app.utils import hook_generator
+from app.utils import hook_generator, number_counter, progress_overlay
 from app.services.utils import video_effects, pacing, sfx
 
 class SubClippedVideoClip:
@@ -135,10 +135,25 @@ def combine_videos(
     transition_speed: float = 0.5,
     apply_ken_burns: bool = True,
     color_enhancement: bool = True,
+    enable_pattern_interrupts: bool = True,
 ) -> str:
+    audio_clip = AudioFileClip(audio_file)
+    # Ensure Enums
+    if isinstance(video_aspect, str):
+        video_aspect = VideoAspect(video_aspect)
+    if isinstance(video_concat_mode, str):
+        video_concat_mode = VideoConcatMode(video_concat_mode)
+    if isinstance(video_transition_mode, str):
+         # Handle None case if necessary, but str usually means valid value
+         # Unless it's "None" string?
+         if video_transition_mode == "None":
+             video_transition_mode = VideoTransitionMode.none
+         else:
+             video_transition_mode = VideoTransitionMode(video_transition_mode)
+             
     if video_transition_mode is None:
         video_transition_mode = VideoTransitionMode.none
-    audio_clip = AudioFileClip(audio_file)
+
     audio_duration = audio_clip.duration
     logger.info(f"audio duration: {audio_duration} seconds")
     # Required duration of each clip
@@ -151,43 +166,109 @@ def combine_videos(
     video_width, video_height = aspect.to_resolution()
 
     processed_clips = []
-    subclipped_items = []
-    video_duration = 0
-    for video_path in video_paths:
-        clip = VideoFileClip(video_path)
-        clip_duration = clip.duration
-        clip_w, clip_h = clip.size
-        close_clip(clip)
-        
-        start_time = 0
-
-        # T1-2: Pacing (Variable clip duration)
-        while start_time < clip_duration:
-            if pacing_mode and pacing_mode != "default":
-                segment_duration = pacing.get_clip_duration(pacing_mode)
-            else:
-                segment_duration = max_clip_duration
-
-            end_time = min(start_time + segment_duration, clip_duration)
-            
-            # Allow short clips if they are the tail end (min 1.0s)
-            if end_time - start_time >= 1.0:
-                 subclipped_items.append(SubClippedVideoClip(file_path=video_path, start_time=start_time, end_time=end_time, width=clip_w, height=clip_h))
-            
-            start_time = end_time    
-            if video_concat_mode.value == VideoConcatMode.sequential.value:
-                break
-
-    # random subclipped_items order
-    if video_concat_mode.value == VideoConcatMode.random.value:
-        random.shuffle(subclipped_items)
-        
-    logger.debug(f"total subclipped items: {len(subclipped_items)}")
     
-    # Add downloaded clips over and over until the duration of the audio (max_duration) has been reached
-    for i, subclipped_item in enumerate(subclipped_items):
-        if video_duration > audio_duration:
-            break
+    # T4-1: Init Pattern Interrupt state
+    last_interrupt_time = 0.0
+    available_effects = [
+        video_effects.screen_shake,
+        video_effects.flash_effect,
+        video_effects.chromatic_aberration,
+        video_effects.glitch_effect,
+        video_effects.zoom_burst,
+    ]
+    
+    # T4-2: Pacing Curve (Chop on Demand)
+    # Instead of pre-chopping, we Select -> Chop -> Add based on current timeline position.
+    
+    # helper to track source usage if sequential
+    source_states = {}
+    for vp in video_paths:
+        try:
+            with VideoFileClip(vp) as c:
+               dur = c.duration
+               size = c.size
+            source_states[vp] = {
+                "duration": dur,
+                "current_pos": 0.0,
+                "size": size
+            }
+        except Exception as e:
+            logger.error(f"failed to read video {vp}: {e}")
+            
+    if not source_states:
+        raise ValueError("No valid video sources found")
+
+    video_duration = 0.0
+    subclipped_items = []
+    seq_idx = 0
+    
+    while video_duration < audio_duration:
+        req_dur = pacing.get_clip_duration(pacing_mode, video_duration, audio_duration)
+        req_dur = min(req_dur, max_clip_duration)
+        if req_dur < 1.0: req_dur = 1.0
+        
+        selected_path = None
+        clip_start, clip_end = 0.0, 0.0
+        
+        if video_concat_mode.value == VideoConcatMode.random.value:
+             selected_path = random.choice(video_paths)
+             v_info = source_states.get(selected_path)
+             if not v_info: continue
+             
+             max_start = max(0, v_info["duration"] - req_dur)
+             clip_start = random.uniform(0, max_start)
+             clip_end = min(clip_start + req_dur, v_info["duration"])
+             
+        else: # Sequential
+             # Try current sequence video
+             found = False
+             for _ in range(len(video_paths) * 2): # Try to find a valid segment
+                 selected_path = video_paths[seq_idx % len(video_paths)]
+                 v_info = source_states.get(selected_path)
+                 if not v_info:
+                     seq_idx += 1
+                     continue
+
+                 if v_info["current_pos"] < v_info["duration"] - 0.5:
+                     clip_start = v_info["current_pos"]
+                     clip_end = min(clip_start + req_dur, v_info["duration"])
+                     v_info["current_pos"] = clip_end
+                     found = True
+                     break
+                 else:
+                     # Exhausted, move next and reset this one for valid looping
+                     v_info["current_pos"] = 0
+                     seq_idx += 1
+             
+             if not found:
+                 # Fallback
+                 selected_path = video_paths[0]
+                 v_info = source_states[selected_path]
+                 clip_start = 0
+                 clip_end = min(req_dur, v_info["duration"])
+
+        if selected_path:
+             v_info = source_states[selected_path]
+             dur = clip_end - clip_start
+             if dur > 0.1:
+                 subclipped_items.append(SubClippedVideoClip(
+                     file_path=selected_path,
+                     start_time=clip_start,
+                     end_time=clip_end,
+                     width=v_info["size"][0],
+                     height=v_info["size"][1]
+                 ))
+                 video_duration += dur
+
+    logger.debug(f"generated {len(subclipped_items)} subclips using {pacing_mode} pacing")
+    
+    # Assign to processed_clips directly as we already filled the duration
+    processed_clips = subclipped_items
+
+    # Process the generated clips
+    video_duration = 0.0 # Track processed duration
+    for i, subclipped_item in enumerate(processed_clips):
+        # No need for `if video_duration > audio_duration: break` here, as `processed_clips` is already sized.
         
         logger.debug(f"processing clip {i+1}: {subclipped_item.width}x{subclipped_item.height}, current duration: {video_duration:.2f}s, remaining: {audio_duration - video_duration:.2f}s")
         
@@ -269,7 +350,29 @@ def combine_videos(
                 shuffle_transition = random.choice(transition_funcs)
                 clip = shuffle_transition(clip)
 
+            # T4-1: Pattern Interrupts
+            # Check if we should apply effect (every 5-8s)
+            if enable_pattern_interrupts: # Changed from params.enable_pattern_interrupts
+                # video_duration is current start time
+                interval = random.uniform(5.0, 8.0)
+                if (video_duration - last_interrupt_time) > interval:
+                     effect_func = random.choice(available_effects)
+                     try:
+                         # Apply effect
+                         logger.info(f"applying pattern interrupt {effect_func.__name__} at {video_duration:.2f}s")
+                         affected_clip = effect_func(clip)
+                         
+                         # Ensure audio is preserved
+                         if clip.audio and not affected_clip.audio:
+                             affected_clip = affected_clip.with_audio(clip.audio)
+                         
+                         clip = affected_clip
+                         last_interrupt_time = video_duration
+                     except Exception as e:
+                         logger.warning(f"failed to apply pattern interrupt: {e}")
+
             # T3-3: Auto-SFX on transition
+
             # Remove original audio (stock noise)
             clip = clip.without_audio()
             
@@ -359,12 +462,11 @@ def combine_videos(
             # Fallback: load all clips and concat via moviepy (single write)
             all_clips = [VideoFileClip(c.file_path) for c in processed_clips]
             merged = concatenate_videoclips(all_clips)
+
             merged.write_videofile(
                 combined_video_path,
                 threads=threads,
-                logger=None,
-                temp_audiofile_path=output_dir,
-                audio_codec=audio_codec,
+                audio_codec="aac",
                 fps=fps,
                 bitrate="8000k",
             )
@@ -578,7 +680,71 @@ def generate_video(
         for item in subtitle_items:
             clip = create_text_clip(subtitle_item=item)
             text_clips.append(clip)
-        video_clip = CompositeVideoClip([video_clip, *text_clips])
+    # T4-4: Number Counter Animation
+    overlay_clips = [] # Initialize overlay_clips here for number counter and other overlays
+    if params.enable_number_counter and subtitle_path and os.path.exists(subtitle_path):
+        try:
+            # 1. Parse subtitles to find timings
+            from app.services import subtitle
+            subs = subtitle.file_to_subtitles(subtitle_path)
+            
+            # 2. Extract numbers
+            # script is not readily available here as raw text, but we can search within subtitles
+            numbers = number_counter.extract_numbers_from_script(None, subs)
+            
+            # 3. Create Overlays
+            # Limit number of counters to avoid clutter? Or show all >= 100.
+            for num in numbers:
+                logger.info(f"adding counter for {num['value']} at {num['start']}s")
+                # Create animation
+                # Color from params
+                counter_clip = number_counter.create_counter_clip(
+                    target_number=num['value'],
+                    duration=1.5, # Fixed duration or dynamic?
+                    font_path=font_path,
+                    color=params.text_fore_color
+                )
+                
+                # Position: Center? Or slightly above center?
+                # Hook is at 0.15 * h (top). Subtitles at bottom.
+                # Center is safe.
+                counter_clip = counter_clip.with_position("center")
+                counter_clip = counter_clip.with_start(num['start'])
+                
+                # Crossfade in/out
+                counter_clip = counter_clip.with_effects([vfx.CrossFadeIn(0.2), vfx.CrossFadeOut(0.2)])
+                
+                overlay_clips.append(counter_clip)
+                
+        except Exception as e:
+            logger.error(f"failed to add number counters: {e}")
+            
+    # T4-5: Progress Bar Overlay
+    if params.enable_progress_bar and subtitle_path and os.path.exists(subtitle_path):
+        try:
+             # Use parsed subtitles from earlier if available, or load again
+             # We loaded 'subs' inside number counter block. But that block depends on enable_number_counter.
+             # So we should load subs again or lift variable.
+             from app.services import subtitle
+             subs_for_progress = subtitle.file_to_subtitles(subtitle_path)
+             
+             bar_clip = progress_overlay.create_progress_bar_clip(
+                 video_size=(video_clip.w, video_clip.h),
+                 subtitles=subs_for_progress,
+                 video_duration=video_clip.duration,
+                 fill_color=params.text_fore_color
+             )
+             
+             if bar_clip:
+                 # Crossfade in/out
+                 bar_clip = bar_clip.with_effects([vfx.CrossFadeIn(0.5), vfx.CrossFadeOut(0.5)])
+                 overlay_clips.append(bar_clip)
+                 logger.info("added progress bar overlay")
+        except Exception as e:
+            logger.error(f"failed to add progress bar: {e}")
+
+    # Combine all
+    video_clip = CompositeVideoClip([video_clip, *text_clips, *overlay_clips])
 
     # Audio Mixing: Voice + BGM + SFX
     audio_source = [audio_clip] # Start with normalized voice

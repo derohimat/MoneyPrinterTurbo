@@ -141,3 +141,99 @@ def create_rounded_box_clip(size, color, opacity=0.8, radius=15, duration=None):
         mask_clip = mask_clip.with_duration(duration)
 
     return bg_clip.with_mask(mask_clip)
+
+
+# T4-3: Visual Effects Library
+
+def screen_shake(clip: Clip, intensity: int = 10) -> Clip:
+    """Random per-frame pixel offset."""
+    def make_frame(get_frame, t):
+        frame = get_frame(t)
+        # Random dx, dy
+        dx, dy = np.random.randint(-intensity, intensity, 2)
+        # Using roll for wrap-around shift (fastest)
+        # Axis 0 = rows (y), Axis 1 = columns (x)
+        frame_rolled = np.roll(frame, dx, axis=1)
+        frame_rolled = np.roll(frame_rolled, dy, axis=0)
+        return frame_rolled
+        
+    return clip.transform(make_frame)
+
+def flash_effect(clip: Clip, duration: float = 0.2, color: str = "white") -> Clip:
+    """Flash screen with color for duration at start."""
+    w, h = clip.size
+    from PIL import ImageColor
+    if isinstance(color, str):
+        c = ImageColor.getrgb(color)
+    else:
+        c = color
+        
+    flash = ColorClip(size=(w, h), color=c).with_duration(duration)
+    # Fade out flash
+    flash = flash.with_effects([vfx.FadeOut(duration)])
+    
+    # Ideally composite over clip starting at 0
+    # But if clip is long, flash only at start.
+    return CompositeVideoClip([clip, flash.with_start(0)])
+
+def chromatic_aberration(clip: Clip, offset: int = 5) -> Clip:
+    """Shift Red and Blue channels in opposite directions."""
+    def make_frame(get_frame, t):
+        frame = get_frame(t).copy()
+        # R channel shift
+        frame[:, :, 0] = np.roll(frame[:, :, 0], offset, axis=1)
+        # B channel shift
+        frame[:, :, 2] = np.roll(frame[:, :, 2], -offset, axis=1)
+        return frame
+    return clip.transform(make_frame)
+
+def glitch_effect(clip: Clip) -> Clip:
+    """RGB split + random slicing."""
+    def make_frame(get_frame, t):
+        frame = get_frame(t).copy()
+        # Occasional heavy glitch
+        if np.random.random() > 0.3:
+            offset = np.random.randint(5, 20)
+            frame[:, :, 0] = np.roll(frame[:, :, 0], offset, axis=1)
+            frame[:, :, 2] = np.roll(frame[:, :, 2], -offset, axis=1)
+            # Slice
+            y = np.random.randint(0, frame.shape[0] - 20)
+            h_slice = np.random.randint(5, 50)
+            shift = np.random.randint(-50, 50)
+            if y+h_slice < frame.shape[0]:
+                 # Shift slice horizontally
+                 frame[y:y+h_slice, :, :] = np.roll(frame[y:y+h_slice, :, :], shift, axis=1)
+        return frame
+    return clip.transform(make_frame)
+
+def zoom_burst(clip: Clip, duration: float = 0.3, zoom_to: float = 1.3) -> Clip:
+    """Quick zoom in and out (pulse)."""
+    w, h = clip.size
+    orig_dur = clip.duration
+    
+    def make_frame(get_frame, t):
+        frame = get_frame(t)
+        img = Image.fromarray(frame)
+        
+        # Triangle wave for zoom: 0 -> max -> 0
+        cycle_t = t % duration
+        progress = cycle_t / duration
+        
+        if progress < 0.5:
+            # 0 -> 1: Zoom in
+            z = 1.0 + (zoom_to - 1.0) * (progress * 2)
+        else:
+            # 1 -> 0: Zoom out
+            z = zoom_to - (zoom_to - 1.0) * ((progress - 0.5) * 2)
+            
+        new_w = int(w / z)
+        new_h = int(h / z)
+        
+        x = (w - new_w) // 2
+        y = (h - new_h) // 2
+        
+        cropped = img.crop((x, y, x + new_w, y + new_h))
+        resized = cropped.resize((w, h), Image.Resampling.LANCZOS)
+        return np.array(resized)
+
+    return clip.transform(make_frame)

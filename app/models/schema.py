@@ -110,6 +110,10 @@ class VideoParams(BaseModel):
     subtitle_mode: str = "phrase" # "phrase" or "word"
     text_fore_color: Optional[str] = "#FFFFFF"
     text_background_color: Union[bool, str] = True
+    # TIER 4
+    enable_pattern_interrupts: bool = True
+    enable_number_counter: bool = True
+    enable_progress_bar: bool = False # Default False as it's specific to listicles
 
     font_size: int = 60
     stroke_color: Optional[str] = "#000000"

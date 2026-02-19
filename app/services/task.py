@@ -298,6 +298,7 @@ def generate_final_videos(
             transition_speed=params.transition_speed,
             apply_ken_burns=params.apply_ken_burns,
             color_enhancement=params.color_enhancement,
+            enable_pattern_interrupts=params.enable_pattern_interrupts,
         )
 
         _progress += 50 / params.video_count / 2
