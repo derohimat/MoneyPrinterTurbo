@@ -34,6 +34,19 @@ def init_db():
             prompt_hash TEXT DEFAULT NULL
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS publish_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_path TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            scheduled_time TIMESTAMP NOT NULL,
+            status TEXT DEFAULT 'pending', -- pending, processing, published, failed
+            error_message TEXT,
+            metadata_json TEXT, -- title, description, tags
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     # Migrate existing DB: add new columns if missing
     for col, col_def in [
         ("duration_seconds", "REAL DEFAULT NULL"),
@@ -349,3 +362,64 @@ def add_job(job_id, topic, category, status="pending", meta=None, prompt_hash=No
         conn.close()
     except Exception as e:
         logger.error(f"DB Add Job Error: {e}")
+
+# T5-5: Scheduled Publishing Methods
+
+def add_to_publish_queue(video_path, platform, scheduled_time, metadata=None):
+    """Add a video to the publish queue."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        meta_str = json.dumps(metadata) if metadata else "{}"
+        c.execute("""
+            INSERT INTO publish_queue (video_path, platform, scheduled_time, status, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, 'pending', ?, ?, ?)
+        """, (video_path, platform, scheduled_time, meta_str, datetime.now(), datetime.now()))
+        conn.commit()
+        last_id = c.lastrowid
+        conn.close()
+        logger.info(f"Added to publish queue: {video_path} for {platform} at {scheduled_time}")
+        return last_id
+    except Exception as e:
+        logger.error(f"DB Add Publish Queue Error: {e}")
+        return None
+
+def get_due_publish_tasks():
+    """Get pending publish tasks that are due."""
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        now = datetime.now()
+        c.execute("""
+            SELECT * FROM publish_queue 
+            WHERE status = 'pending' AND scheduled_time <= ?
+            ORDER BY scheduled_time ASC
+        """, (now,))
+        rows = c.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error(f"DB Get Due Publish Error: {e}")
+        return []
+
+def update_publish_status(task_id, status, error_message=None):
+    """Update status of a publish task."""
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        updates = ["status = ?", "updated_at = ?"]
+        params = [status, datetime.now()]
+        
+        if error_message:
+            updates.append("error_message = ?")
+            params.append(error_message)
+            
+        params.append(task_id)
+        
+        sql = f"UPDATE publish_queue SET {', '.join(updates)} WHERE id = ?"
+        c.execute(sql, params)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"DB Update Publish Status Error: {e}")
