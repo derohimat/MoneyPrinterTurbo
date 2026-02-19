@@ -54,6 +54,20 @@ def init_analytics_db():
         )
     """)
     
+    # Table for A/B tests
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ab_tests (
+            test_id TEXT PRIMARY KEY,
+            test_name TEXT,
+            variant_task_ids TEXT,  -- JSON list of task_ids
+            winner_task_id TEXT,
+            min_views INTEGER DEFAULT 1000,
+            status TEXT DEFAULT 'active', -- active, evaluating, concluded
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            concluded_at TIMESTAMP
+        )
+    """)
+    
     conn.commit()
     conn.close()
     logger.info(f"Analytics DB initialized at {DB_PATH}")
@@ -222,3 +236,86 @@ def get_hooks_by_category(category, limit=10, min_samples=3):
     except Exception as e:
         logger.error(f"Analytics Category Hooks Error: {e}")
         return []
+
+def create_ab_test(test_name, variant_task_ids, min_views=1000):
+    """Create a new A/B test."""
+    try:
+        import uuid
+        test_id = str(uuid.uuid4())
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO ab_tests (test_id, test_name, variant_task_ids, min_views, status)
+            VALUES (?, ?, ?, ?, 'active')
+        """, (test_id, test_name, json.dumps(variant_task_ids), min_views))
+        conn.commit()
+        conn.close()
+        logger.info(f"Created A/B test {test_id}: {test_name}")
+        return test_id
+    except Exception as e:
+        logger.error(f"Create A/B Test Error: {e}")
+        return None
+
+def evaluate_ab_test(test_id):
+    """
+    Evaluate A/B test. 
+    If all variants have > min_views, pick winner (highest retention).
+    Returns winner_task_id or None.
+    """
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        
+        c.execute("SELECT * FROM ab_tests WHERE test_id=?", (test_id,))
+        test = c.fetchone()
+        if not test:
+            conn.close()
+            return None
+            
+        variants = json.loads(test["variant_task_ids"])
+        min_views = test["min_views"]
+        
+        best_retention = -1.0
+        best_variant = None
+        ready_count = 0
+        
+        for task_id in variants:
+            c.execute("SELECT views, retention_rate FROM video_performance WHERE task_id=?", (task_id,))
+            perf = c.fetchone()
+            
+            if not perf:
+                continue
+                
+            views = perf["views"]
+            retention = perf["retention_rate"]
+            
+            if views >= min_views:
+                ready_count += 1
+                if retention > best_retention:
+                    best_retention = retention
+                    best_variant = task_id
+            else:
+                # If any variant is not ready, we can't conclude?
+                # Usually yes, unless we have a "evaluate_early" flag. 
+                # Strict: wait for all.
+                pass
+                
+        if ready_count == len(variants) and best_variant:
+            # Conclude
+            c.execute("""
+                UPDATE ab_tests 
+                SET status='concluded', winner_task_id=?, concluded_at=? 
+                WHERE test_id=?
+            """, (best_variant, datetime.now(), test_id))
+            conn.commit()
+            conn.close()
+            logger.info(f"A/B test {test_id} concluded. Winner: {best_variant}")
+            return best_variant
+            
+        conn.close()
+        return None
+        
+    except Exception as e:
+        logger.error(f"Evaluate A/B Test Error: {e}")
+        return None
