@@ -392,3 +392,41 @@ def get_ab_tests():
     except Exception:
         return []
 
+def get_all_performance_data(limit=1000):
+    """Fetch joined performance and context data for export."""
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("""
+            SELECT 
+                p.task_id, p.platform, p.views, p.retention_rate, p.ctr, p.updated_at,
+                g.video_subject, g.category, g.voice_name, g.hook_template, g.created_at as generated_at
+            FROM video_performance p
+            LEFT JOIN generation_context g ON p.task_id = g.task_id
+            ORDER BY p.updated_at DESC
+            LIMIT ?
+        """, (limit,))
+        rows = c.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error(f"Analytics Export Error: {e}")
+        return []
+
+def export_csv(limit=1000):
+    """Export performance data as CSV string."""
+    import csv
+    import io
+    
+    data = get_all_performance_data(limit)
+    if not data:
+        return ""
+        
+    output = io.StringIO()
+    # fieldnames from first row keys
+    writer = csv.DictWriter(output, fieldnames=list(data[0].keys()))
+    writer.writeheader()
+    writer.writerows(data)
+    return output.getvalue()
+

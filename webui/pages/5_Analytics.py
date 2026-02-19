@@ -10,7 +10,7 @@ root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__fi
 if root_dir not in sys.path:
     sys.path.append(root_dir)
 
-from app.utils import analytics_db, script_scorer
+from app.utils import analytics_db, script_scorer, retention_predictor
 from app.services import task as tm
 
 st.set_page_config(page_title="Analytics", page_icon="📈", layout="wide")
@@ -53,6 +53,16 @@ with tab_overview:
         col4.metric("Best Category", best_cat["category"], f"{best_cat['avg_retention']*100:.1f}% Ret.")
     else:
         col4.metric("Best Category", "N/A")
+
+    # T6-7: Export Data
+    csv_data = analytics_db.export_csv()
+    if csv_data:
+        st.download_button(
+            label="📥 Export Report (CSV)",
+            data=csv_data,
+            file_name=f"analytics_report.csv",
+            mime="text/csv",
+        )
 
     st.divider()
 
@@ -178,7 +188,31 @@ with tab_scorer:
                 st.subheader("Breakdown")
                 st.json(res["breakdown"])
             
-            if res["feedback"]:
-                st.subheader("Tips")
-                for tip in res["feedback"]:
-                    st.info(f"💡 {tip}")
+                if res["feedback"]:
+                    st.subheader("Tips")
+                    for tip in res["feedback"]:
+                        st.info(f"💡 {tip}")
+
+            st.divider()
+            
+            # T6-8: Retention Heatmap / Curve
+            st.subheader("Predicted Retention Curve (Heatmap)")
+            st.write("Estimated audience retention over time based on script pacing and emotional spikes.")
+            
+            # Estimate duration based on word count (approx 150 wpm)
+            word_count = res.get("metrics", {}).get("word_count", 100)
+            est_duration = max(10, int(word_count / 2.5))
+            
+            retention_data = retention_predictor.get_retention_heatmap_data(script_input, duration=est_duration)
+            
+            if retention_data["engagement"]:
+                # Create a DataFrame for the chart
+                df_retention = pd.DataFrame({
+                    "Seconds": retention_data["seconds"],
+                    "Engagement Score": retention_data["engagement"]
+                })
+                
+                # Use a line chart with area
+                st.area_chart(df_retention, x="Seconds", y="Engagement Score", color="#FF4B4B")
+                
+                st.caption("Higher peaks indicate engaging moments (questions, exclamations, fast pacing). Dips indicate complex sentences or lack of hooks.")
