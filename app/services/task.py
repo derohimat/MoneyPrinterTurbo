@@ -13,7 +13,7 @@ from app.services import state as sm
 from app.utils import utils
 from app.utils import safety_filters
 from app.utils import metadata_gen
-from app.utils import thumbnail, platform_export, highlight_extractor
+from app.utils import thumbnail, platform_export, highlight_extractor, analytics_db
 from app.services.veo import generator as veo_generator
 
 
@@ -362,6 +362,12 @@ def generate_final_videos(
                  )
              except Exception as e:
                  logger.error(f"failed to extract highlights: {e}")
+
+        # T6-1: Log Analytics Context
+        try:
+             analytics_db.log_generation_context(task_id, params, video_script)
+        except Exception as e:
+             logger.warning(f"failed to log analytics context: {e}")
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
