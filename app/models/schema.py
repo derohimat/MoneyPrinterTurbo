@@ -114,6 +114,9 @@ class VideoParams(BaseModel):
     enable_pattern_interrupts: bool = True
     enable_number_counter: bool = True
     enable_progress_bar: bool = False # Default False as it's specific to listicles
+    # TIER 5
+    thumbnail_count: int = 3 # Number of thumbnails to generate
+    export_platforms: List[str] = ["youtube_shorts"] # youtube_shorts, tiktok, instagram_reels
 
     font_size: int = 60
     stroke_color: Optional[str] = "#000000"

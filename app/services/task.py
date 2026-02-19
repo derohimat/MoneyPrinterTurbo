@@ -13,7 +13,7 @@ from app.services import state as sm
 from app.utils import utils
 from app.utils import safety_filters
 from app.utils import metadata_gen
-from app.utils import thumbnail
+from app.utils import thumbnail, platform_export
 from app.services.veo import generator as veo_generator
 
 
@@ -322,6 +322,33 @@ def generate_final_videos(
             output_file=final_video_path,
             params=params,
         )
+
+        # T5-1: Multi-Thumbnail Generation
+        if params.thumbnail_count > 0:
+            try:
+                thumb_dir = path.join(utils.task_dir(task_id), "thumbnails")
+                logger.info(f"generating {params.thumbnail_count} thumbnails to {thumb_dir}")
+                thumbnail.generate_thumbnails(
+                    video_path=final_video_path,
+                    output_dir=thumb_dir,
+                    count=params.thumbnail_count,
+                    text_overlay=params.video_subject
+                )
+            except Exception as e:
+                logger.error(f"failed to generate thumbnails: {e}")
+
+        # T5-3: Platform-Specific Export
+        if params.export_platforms:
+             try:
+                 export_dir = path.join(utils.task_dir(task_id), "exports")
+                 logger.info(f"exporting to platforms {params.export_platforms} in {export_dir}")
+                 platform_export.export_for_platforms(
+                     video_path=final_video_path,
+                     output_dir=export_dir,
+                     platforms=params.export_platforms
+                 )
+             except Exception as e:
+                 logger.error(f"failed to export platforms: {e}")
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
