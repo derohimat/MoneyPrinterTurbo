@@ -106,6 +106,8 @@ class VideoParams(BaseModel):
     transition_speed: Optional[float] = 0.5
     apply_ken_burns: Optional[bool] = True
     color_enhancement: Optional[bool] = True
+    # TIER 2
+    subtitle_mode: str = "phrase" # "phrase" or "word"
     text_fore_color: Optional[str] = "#FFFFFF"
     text_background_color: Union[bool, str] = True
 

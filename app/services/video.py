@@ -5,6 +5,8 @@ import random
 import gc
 import shutil
 import numpy as np
+import re
+import json
 from typing import List
 from loguru import logger
 from moviepy import (
@@ -483,18 +485,38 @@ def generate_video(
             font=font_path,
             font_size=params.font_size,
             color=params.text_fore_color,
-            bg_color=params.text_background_color,
+            bg_color=None, # T2-2: We handle background manually
             stroke_color=params.stroke_color,
             stroke_width=params.stroke_width,
             # interline=interline,
             # size=size,
         )
+        
+        # T2-2: Subtitle background box
+        bg_color = params.text_background_color
+        if bg_color:
+            if isinstance(bg_color, bool):
+                 bg_color = "#000000" # Default black if just 'True'
+            
+            # Create rounded box
+            padding = 20
+            w, h = _clip.size
+            bg_size = (w + padding, h + padding)
+            bg_clip = video_effects.create_rounded_box_clip(bg_size, color=bg_color, radius=15, opacity=0.8)
+            
+            # Center text on background
+            _clip = CompositeVideoClip([bg_clip, _clip.with_position("center")])
+
         duration = subtitle_item[0][1] - subtitle_item[0][0]
         _clip = _clip.with_start(subtitle_item[0][0])
         _clip = _clip.with_end(subtitle_item[0][1])
         _clip = _clip.with_duration(duration)
         # T0-5: Platform-aware safe zone positioning
         from app.utils.safe_zones import get_safe_subtitle_y
+        if params.subtitle_mode == "word":
+             # Apply pop-in for word level animation
+             _clip = video_effects.pop_in_effect(_clip, duration=0.1)
+
         target_platform = getattr(params, "target_platform", "default") or "default"
         
         if params.subtitle_position == "bottom":
@@ -530,11 +552,30 @@ def generate_video(
         )
 
     if subtitle_path and os.path.exists(subtitle_path):
-        sub = SubtitlesClip(
-            subtitles=subtitle_path, encoding="utf-8", make_textclip=make_textclip
-        )
+        subtitle_items = []
+        json_path = subtitle_path.replace(".srt", ".json")
+        
+        # T2-1: check for word-level mode and available data
+        if params.subtitle_mode == "word" and os.path.exists(json_path):
+             try:
+                 with open(json_path, "r", encoding="utf-8") as f:
+                     word_data = json.load(f)
+                 # Convert to format expected by create_text_clip: ((start, end), text)
+                 for w in word_data:
+                     subtitle_items.append(((w['start'], w['end']), w['word']))
+                 logger.info(f"using word-level subtitles: {len(subtitle_items)} words")
+             except Exception as e:
+                 logger.error(f"failed to load subtitle json: {e}, falling back to srt")
+                 
+        if not subtitle_items:
+            # Fallback to SRT (Phrase level)
+            sub = SubtitlesClip(
+                subtitles=subtitle_path, encoding="utf-8", make_textclip=make_textclip
+            )
+            subtitle_items = sub.subtitles
+
         text_clips = []
-        for item in sub.subtitles:
+        for item in subtitle_items:
             clip = create_text_clip(subtitle_item=item)
             text_clips.append(clip)
         video_clip = CompositeVideoClip([video_clip, *text_clips])
@@ -626,7 +667,9 @@ def generate_video(
             )
             hook_clip = hook_clip.with_start(0).with_duration(3)
             hook_clip = hook_clip.with_position(("center", video_height * 0.15))
-            hook_clip = hook_clip.with_effects([vfx.CrossFadeIn(0.3), vfx.CrossFadeOut(0.5)])
+            # T2-5: Hook pop-in animation
+            hook_clip = video_effects.pop_in_effect(hook_clip, duration=0.5)
+            hook_clip = hook_clip.with_effects([vfx.CrossFadeOut(0.5)])
             overlay_clips.append(hook_clip)
             logger.info(f"  ⑦ hook: {hook_text}")
     except Exception as e:

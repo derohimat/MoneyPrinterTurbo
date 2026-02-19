@@ -1,6 +1,6 @@
-from moviepy import Clip, vfx, CompositeVideoClip
+from moviepy import Clip, vfx, CompositeVideoClip, ColorClip, ImageClip
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageDraw
 import random
 
 
@@ -86,3 +86,58 @@ def zoom_transition(clip: Clip, t: float = 0.4, mode: str = "in") -> Clip:
         return clip.with_effects([vfx.FadeIn(t)]) # Placeholder
     else:
         return clip.with_effects([vfx.FadeOut(t)]) # Placeholder
+
+# T2-5: Pop-in animation
+def pop_in_effect(clip: Clip, duration: float = 0.5) -> Clip:
+    """
+    Animated scale from 0 to 1 over duration with overshoot (pop effect).
+    """
+    def scale(t):
+        if t < duration:
+            progress = t / duration
+            # Pop effect: Overshoot to 1.2 then settle to 1.0
+            if progress < 0.7:
+                 s = (progress / 0.7) * 1.2
+                 return max(0.1, s) # Avoid 0 size crash
+            else:
+                 return 1.2 - ((progress - 0.7) / 0.3) * 0.2
+        return 1.0
+    
+    # Apply resize animation
+    return clip.resized(scale)
+
+# T2-2: Subtitle background box
+def create_rounded_box_clip(size, color, opacity=0.8, radius=15, duration=None):
+    """
+    Create a rounded rectangle ColorClip.
+    """
+    w, h = size
+    # Increase resolution for anti-aliasing
+    scale = 2
+    w_up, h_up = int(w * scale), int(h * scale)
+    radius_up = int(radius * scale)
+    
+    # Create mask image (white rounded rect on black bg)
+    img = Image.new('L', (w_up, h_up), 0)
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle((0, 0, w_up, h_up), radius=radius_up, fill=255)
+    
+    # Resize back
+    mask_img = img.resize((int(w), int(h)), Image.Resampling.LANCZOS)
+    mask_arr = np.array(mask_img) / 255.0
+    
+    from PIL import ImageColor
+    if isinstance(color, str):
+        color = ImageColor.getrgb(color)
+        
+    # Create ColorClip
+    bg_clip = ColorClip(size=(int(w), int(h)), color=color).with_opacity(opacity)
+    if duration:
+        bg_clip = bg_clip.with_duration(duration)
+    
+    # Set mask
+    mask_clip = ImageClip(mask_arr, is_mask=True)
+    if duration:
+        mask_clip = mask_clip.with_duration(duration)
+
+    return bg_clip.with_mask(mask_clip)
