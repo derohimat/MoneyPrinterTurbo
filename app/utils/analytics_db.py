@@ -319,3 +319,76 @@ def evaluate_ab_test(test_id):
     except Exception as e:
         logger.error(f"Evaluate A/B Test Error: {e}")
         return None
+
+def get_daily_views(days=30):
+    """Refactored to group by date."""
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        # aggregated views from video_performance
+        # We need to group by updated_at date. 
+        # Note: video_performance has updated_at.
+        # But wait, video_performance is a snapshot of current views.
+        # It's not a time-series of daily views.
+        # So sum(views) is "total views to date".
+        # If we want daily gains, we need a history table or just show trend of TOTAL views over creation date?
+        # Let's show "Total Views by Video Creation Date" for now, which is a proxy.
+        # Or better: just show top performing videos.
+        
+        # Let's try: Sum of views for videos created on date X.
+        c.execute("""
+            SELECT 
+                date(g.created_at) as date,
+                SUM(p.views) as total_views
+            FROM generation_context g
+            JOIN video_performance p ON g.task_id = p.task_id
+            GROUP BY date(g.created_at)
+            ORDER BY date(g.created_at) DESC
+            LIMIT ?
+        """, (days,))
+        rows = c.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error(f"Analytics Daily Views Error: {e}")
+        return []
+
+def get_category_performance():
+    """Avg retention per category."""
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("""
+            SELECT 
+                g.category,
+                AVG(p.retention_rate) as avg_retention,
+                AVG(p.ctr) as avg_ctr,
+                COUNT(p.id) as video_count
+            FROM generation_context g
+            JOIN video_performance p ON g.task_id = p.task_id
+            WHERE g.category IS NOT NULL
+            GROUP BY g.category
+            ORDER BY avg_retention DESC
+        """)
+        rows = c.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error(f"Analytics Category Perf Error: {e}")
+        return []
+        
+def get_ab_tests():
+    """Get all A/B tests."""
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM ab_tests ORDER BY created_at DESC")
+        rows = c.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
