@@ -20,6 +20,7 @@ def init_analytics_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id TEXT NOT NULL,
             video_subject TEXT,
+            category TEXT,
             platform TEXT DEFAULT 'youtube',
             views INTEGER DEFAULT 0,
             likes INTEGER DEFAULT 0,
@@ -40,6 +41,7 @@ def init_analytics_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id TEXT NOT NULL UNIQUE,
             video_subject TEXT,
+            category TEXT,
             script_hash TEXT,
             hook_template TEXT,
             thumbnail_variant TEXT,
@@ -82,11 +84,12 @@ def log_generation_context(task_id, params, script_text=None):
         
         c.execute("""
             INSERT OR IGNORE INTO generation_context 
-            (task_id, video_subject, script_hash, voice_name, bgm_file, video_source, param_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (task_id, video_subject, category, script_hash, voice_name, bgm_file, video_source, param_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task_id,
             p_dict.get("video_subject"),
+            p_dict.get("video_category"),
             script_hash,
             p_dict.get("audio_voice"),
             p_dict.get("audio_bgm"),
@@ -160,4 +163,62 @@ def get_performance_summary():
         conn.close()
         return [dict(r) for r in rows]
     except Exception:
+        return []
+
+def get_top_hooks(limit=10, min_samples=3):
+    """
+    Return top hook templates sorted by average retention rate.
+    """
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("""
+            SELECT 
+                g.hook_template,
+                COUNT(p.id) as use_count,
+                AVG(p.retention_rate) as avg_retention,
+                AVG(p.ctr) as avg_ctr
+            FROM generation_context g
+            JOIN video_performance p ON g.task_id = p.task_id
+            WHERE g.hook_template IS NOT NULL AND g.hook_template != ''
+            GROUP BY g.hook_template
+            HAVING COUNT(p.id) >= ?
+            ORDER BY avg_retention DESC
+            LIMIT ?
+        """, (min_samples, limit))
+        rows = c.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error(f"Analytics Top Hooks Error: {e}")
+        return []
+
+def get_hooks_by_category(category, limit=10, min_samples=3):
+    """
+    Return top hooks for a specific category.
+    """
+    try:
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("""
+            SELECT 
+                g.hook_template,
+                COUNT(p.id) as use_count,
+                AVG(p.retention_rate) as avg_retention,
+                AVG(p.ctr) as avg_ctr
+            FROM generation_context g
+            JOIN video_performance p ON g.task_id = p.task_id
+            WHERE g.category = ? AND g.hook_template IS NOT NULL AND g.hook_template != ''
+            GROUP BY g.hook_template
+            HAVING COUNT(p.id) >= ?
+            ORDER BY avg_retention DESC
+            LIMIT ?
+        """, (category, min_samples, limit))
+        rows = c.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error(f"Analytics Category Hooks Error: {e}")
         return []
