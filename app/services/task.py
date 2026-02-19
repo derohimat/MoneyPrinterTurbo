@@ -13,7 +13,7 @@ from app.services import state as sm
 from app.utils import utils
 from app.utils import safety_filters
 from app.utils import metadata_gen
-from app.utils import thumbnail, platform_export
+from app.utils import thumbnail, platform_export, highlight_extractor
 from app.services.veo import generator as veo_generator
 
 
@@ -349,6 +349,19 @@ def generate_final_videos(
                  )
              except Exception as e:
                  logger.error(f"failed to export platforms: {e}")
+
+        # T5-4: Auto-Clip Extraction
+        if params.extract_highlights:
+             try:
+                 highlight_dir = path.join(utils.task_dir(task_id), "highlights")
+                 logger.info(f"extracting highlights to {highlight_dir}")
+                 highlight_extractor.extract_highlights(
+                     video_path=final_video_path,
+                     subtitle_path=subtitle_path,
+                     output_dir=highlight_dir
+                 )
+             except Exception as e:
+                 logger.error(f"failed to extract highlights: {e}")
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)

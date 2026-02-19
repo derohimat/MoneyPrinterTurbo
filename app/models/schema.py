@@ -117,6 +117,7 @@ class VideoParams(BaseModel):
     # TIER 5
     thumbnail_count: int = 3 # Number of thumbnails to generate
     export_platforms: List[str] = ["youtube_shorts"] # youtube_shorts, tiktok, instagram_reels
+    extract_highlights: bool = False # Extract viral segments as separate clips
 
     font_size: int = 60
     stroke_color: Optional[str] = "#000000"
