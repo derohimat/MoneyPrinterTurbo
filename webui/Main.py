@@ -589,6 +589,11 @@ with left_panel:
         # Faceless Mode
         use_faceless = st.checkbox(tr("Faceless Content Mode"), value=False, help=tr("Avoid showing people's faces. Focus on hands, objects, and scenery."))
         params.use_faceless = use_faceless
+        
+        auto_optimize = st.checkbox(
+            tr("Auto-Optimize (Analytics)"), value=True, help=tr("Automatically use high-performing hooks based on analytics.")
+        )
+        params.auto_optimize = auto_optimize
 
         params.video_terms = video_terms
 with middle_panel:

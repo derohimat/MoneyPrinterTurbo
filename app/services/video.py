@@ -820,7 +820,11 @@ def generate_video(
     # Hook text overlay (first 3 seconds)
     overlay_clips = [video_clip]
     try:
-        hook_text = hook_generator.get_hook_text(category="General", subject=params.video_subject)
+        hook_text = hook_generator.get_hook_text(
+            category=params.video_subject, 
+            subject=params.video_subject,
+            auto_optimize=params.auto_optimize
+        )
         if hook_text:
             hook_font = font_path if font_path else "Arial"
             hook_clip = TextClip(

@@ -103,7 +103,7 @@ def log_generation_context(task_id, params, script_text=None):
         """, (
             task_id,
             p_dict.get("video_subject"),
-            p_dict.get("video_category"),
+            p_dict.get("video_category") or p_dict.get("video_subject"), # Fallback to subject if category not set
             script_hash,
             p_dict.get("audio_voice"),
             p_dict.get("audio_bgm"),
