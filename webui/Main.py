@@ -436,6 +436,11 @@ if not config.app.get("hide_config", False):
                 )
                 st.info(tips)
 
+            config_changed = False
+            if saved_llm_provider != llm_provider:
+                config.app["llm_provider"] = llm_provider
+                config_changed = True
+
             st_llm_api_key = st.text_input(
                 tr("API Key"), value=llm_api_key, type="password"
             )
@@ -447,29 +452,39 @@ if not config.app.get("hide_config", False):
                     value=llm_model_name,
                     key=f"{llm_provider}_model_name_input",
                 )
-                if st_llm_model_name:
-                    config.app[f"{llm_provider}_model_name"] = st_llm_model_name
             else:
                 st_llm_model_name = None
 
-            if st_llm_api_key:
-                config.app[f"{llm_provider}_api_key"] = st_llm_api_key
-            if st_llm_base_url:
-                config.app[f"{llm_provider}_base_url"] = st_llm_base_url
-            if st_llm_model_name:
-                config.app[f"{llm_provider}_model_name"] = st_llm_model_name
+            st_llm_secret_key = ""
             if llm_provider == "ernie":
                 st_llm_secret_key = st.text_input(
                     tr("Secret Key"), value=llm_secret_key, type="password"
                 )
-                config.app[f"{llm_provider}_secret_key"] = st_llm_secret_key
+                if st_llm_secret_key and st_llm_secret_key != llm_secret_key:
+                    config.app[f"{llm_provider}_secret_key"] = st_llm_secret_key
+                    config_changed = True
 
+            st_llm_account_id = ""
             if llm_provider == "cloudflare":
                 st_llm_account_id = st.text_input(
                     tr("Account ID"), value=llm_account_id
                 )
-                if st_llm_account_id:
+                if st_llm_account_id and st_llm_account_id != llm_account_id:
                     config.app[f"{llm_provider}_account_id"] = st_llm_account_id
+                    config_changed = True
+
+            if st_llm_api_key and st_llm_api_key != llm_api_key:
+                config.app[f"{llm_provider}_api_key"] = st_llm_api_key
+                config_changed = True
+            if st_llm_base_url and st_llm_base_url != llm_base_url:
+                config.app[f"{llm_provider}_base_url"] = st_llm_base_url
+                config_changed = True
+            if st_llm_model_name and st_llm_model_name != llm_model_name:
+                config.app[f"{llm_provider}_model_name"] = st_llm_model_name
+                config_changed = True
+                
+            if config_changed:
+                config.save_config()
 
         # 右侧面板 - API 密钥设置
         with right_config_panel:
@@ -483,8 +498,11 @@ if not config.app.get("hide_config", False):
 
             def save_keys_to_config(cfg_key, value):
                 value = value.replace(" ", "")
-                if value:
-                    config.app[cfg_key] = value.split(",")
+                current_values = config.app.get(cfg_key, [])
+                new_values = value.split(",") if value else []
+                if new_values != current_values:
+                    config.app[cfg_key] = new_values
+                    config.save_config()
 
             st.write(tr("Video Source Settings"))
 
