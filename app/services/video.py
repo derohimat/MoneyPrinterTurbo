@@ -757,12 +757,17 @@ def generate_video(
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
     if bgm_file:
         try:
-            bgm_clip = AudioFileClip(bgm_file).with_effects(
+            bgm_clip = AudioFileClip(bgm_file)
+            if bgm_clip.duration and bgm_clip.duration > video_clip.duration:
+                bgm_clip = bgm_clip.subclipped(0, video_clip.duration)
+            else:
+                bgm_clip = bgm_clip.with_effects([afx.AudioLoop(duration=video_clip.duration)])
+                
+            bgm_clip = bgm_clip.with_effects(
                 [
                     afx.MultiplyVolume(params.bgm_volume),
-                    afx.AudioFadeIn(2),   # T0-3: BGM fade-in over 2 seconds
+                    afx.AudioFadeIn(2),
                     afx.AudioFadeOut(3),
-                    afx.AudioLoop(duration=video_clip.duration),
                 ]
             )
             audio_source.append(bgm_clip)
@@ -772,6 +777,7 @@ def generate_video(
     # Composite audio
     try:
         final_audio = CompositeAudioClip(audio_source)
+        final_audio = final_audio.with_duration(video_clip.duration)
         video_clip = video_clip.with_audio(final_audio)
     except Exception as e:
         logger.error(f"failed to composite audio: {str(e)}")
