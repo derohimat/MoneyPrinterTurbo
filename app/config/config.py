@@ -45,6 +45,7 @@ def save_config():
 
 _cfg = load_config()
 app = _cfg.get("app", {})
+hide_config = app.get("hide_config", False)
 whisper = _cfg.get("whisper", {})
 proxy = _cfg.get("proxy", {})
 azure = _cfg.get("azure", {})
