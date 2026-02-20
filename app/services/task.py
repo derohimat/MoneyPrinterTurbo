@@ -19,6 +19,19 @@ from app.services.veo import generator as veo_generator
 
 def generate_script(task_id, params):
     logger.info("\n\n## generating video script")
+    
+    script_file = path.join(utils.task_dir(task_id), "script.json")
+    if os.path.exists(script_file):
+        try:
+            with open(script_file, "r", encoding="utf-8") as f:
+                import json
+                script_data = json.load(f)
+                if script_data.get("script"):
+                    logger.success("script loaded from cache")
+                    return script_data.get("script")
+        except Exception as e:
+            logger.warning(f"failed to load script from cache: {e}")
+            
     video_script = params.video_script.strip()
     if not video_script:
         video_script = llm.generate_script(
@@ -39,6 +52,19 @@ def generate_script(task_id, params):
 
 def generate_terms(task_id, params, video_script):
     logger.info("\n\n## generating video terms")
+    
+    script_file = path.join(utils.task_dir(task_id), "script.json")
+    if os.path.exists(script_file):
+        try:
+            with open(script_file, "r", encoding="utf-8") as f:
+                import json
+                script_data = json.load(f)
+                if script_data.get("search_terms"):
+                    logger.success("video terms loaded from cache")
+                    return script_data.get("search_terms")
+        except Exception as e:
+            logger.warning(f"failed to load terms from cache: {e}")
+
     video_terms = params.video_terms
     if not video_terms:
         video_terms = llm.generate_terms(
@@ -103,6 +129,12 @@ def generate_audio(task_id, params, video_script):
         subject = params.video_subject
         safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{category}_{subject}").replace(" ", "_")
         audio_file = path.join(utils.task_dir(task_id), f"{safe_name}.mp3")
+        
+        if os.path.exists(audio_file) and os.path.getsize(audio_file) > 0:
+            logger.success(f"audio file already exists: {audio_file}")
+            audio_duration = voice.get_audio_duration(audio_file)
+            return audio_file, audio_duration, None
+            
         sub_maker = voice.tts(
             text=video_script,
             voice_name=voice.parse_voice_name(params.voice_name),
@@ -133,7 +165,7 @@ def generate_audio(task_id, params, video_script):
             return None, None, None
         return custom_audio_file, audio_duration, None
 
-def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
+def generate_subtitle(task_id, params, video_script, sub_maker, audio_file, audio_duration):
     '''
     Generate subtitle for the video script.
     If subtitle generation is disabled or no subtitle maker is provided, it will return an empty string.
@@ -142,7 +174,7 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         - subtitle_path: path to the generated subtitle file
     '''
     logger.info("\n\n## generating subtitle")
-    if not params.subtitle_enabled or sub_maker is None:
+    if not params.subtitle_enabled:
         return ""
 
     # Construct filename: Category_Subject.srt
@@ -150,6 +182,14 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     subject = params.video_subject
     safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{category}_{subject}").replace(" ", "_")
     subtitle_path = path.join(utils.task_dir(task_id), f"{safe_name}.srt")
+    
+    if os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0:
+        logger.success(f"subtitle already exists: {subtitle_path}")
+        return subtitle_path
+        
+    if sub_maker is None:
+        return ""
+        
     subtitle_provider = config.app.get("subtitle_provider", "edge").strip().lower()
     logger.info(f"\n\n## generating subtitle, provider: {subtitle_provider}")
 
@@ -285,21 +325,24 @@ def generate_final_videos(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
         logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
-        video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-            pacing_mode=params.pacing_mode,
-            transition_speed=params.transition_speed,
-            apply_ken_burns=params.apply_ken_burns,
-            color_enhancement=params.color_enhancement,
-            enable_pattern_interrupts=params.enable_pattern_interrupts,
-        )
+        if os.path.exists(combined_video_path) and os.path.getsize(combined_video_path) > 0:
+            logger.success(f"combined video already exists: {combined_video_path}")
+        else:
+            video.combine_videos(
+                combined_video_path=combined_video_path,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+                pacing_mode=params.pacing_mode,
+                transition_speed=params.transition_speed,
+                apply_ken_burns=params.apply_ken_burns,
+                color_enhancement=params.color_enhancement,
+                enable_pattern_interrupts=params.enable_pattern_interrupts,
+            )
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
@@ -315,13 +358,16 @@ def generate_final_videos(
             final_video_path = path.join(utils.task_dir(task_id), f"{safe_name}.mp4")
 
         logger.info(f"\n\n## generating video: {index} => {final_video_path}")
-        video.generate_video(
-            video_path=combined_video_path,
-            audio_path=audio_file,
-            subtitle_path=subtitle_path,
-            output_file=final_video_path,
-            params=params,
-        )
+        if os.path.exists(final_video_path) and os.path.getsize(final_video_path) > 0:
+            logger.success(f"final video already exists: {final_video_path}")
+        else:
+            video.generate_video(
+                video_path=combined_video_path,
+                audio_path=audio_file,
+                subtitle_path=subtitle_path,
+                output_file=final_video_path,
+                params=params,
+            )
 
         # T5-1: Multi-Thumbnail Generation
         if params.thumbnail_count > 0:
@@ -547,7 +593,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     # ─────────────────────────────────────────────────────────────────────────
 
     # 4. Generate subtitle (requires audio)
-    subtitle_path = generate_subtitle(task_id, params, video_script, sub_maker, audio_file)
+    subtitle_path = generate_subtitle(task_id, params, video_script, sub_maker, audio_file, audio_duration)
 
     if stop_at == "subtitle":
         sm.state.update_task(

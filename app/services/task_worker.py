@@ -94,6 +94,9 @@ class TaskWorker:
         db.update_job_status(job_id, 'processing')
         job_start_time = time.time()  # [N2] Track start time
         
+        # Ensure we have the latest config/API keys before processing the job
+        config.reload()
+        
         try:
             # Reconstruct params
             params = None
@@ -102,6 +105,10 @@ class TaskWorker:
                     meta = json.loads(job['meta_json'])
                     # Filter out None values to let defaults take over if needed
                     meta = {k: v for k, v in meta.items() if v is not None}
+                    
+                    if 'video_subject' not in meta:
+                        meta['video_subject'] = job['topic']
+                        
                     # Pydantic v1 vs v2 compatibility check
                     params = VideoParams(**meta)
                 except Exception as e:
