@@ -326,6 +326,12 @@ with tab_system:
             new_material_dir = st.text_input("Material Directory", value=material_dir, 
                                              help="Leave empty for default (./storage/cache_videos)",
                                              key="cfg_material_dir")
+            
+        with st.container(border=True):
+            st.write("**UI & App Settings**")
+            hide_config_setting = st.checkbox("Hide Basic Settings on Main Page", 
+                                              value=raw_config.get("app", {}).get("hide_config", False), 
+                                              key="cfg_hide_config")
     
     # Redis settings
     with st.expander("🔴 Redis Configuration", expanded=False):
@@ -363,6 +369,7 @@ with save_col1:
             cfg["app"]["max_concurrent_tasks"] = max_tasks
             cfg["app"]["subtitle_provider"] = subtitle_provider
             cfg["app"]["llm_provider"] = llm_provider
+            cfg["app"]["hide_config"] = hide_config_setting
             
             # LLM settings
             if new_api_key:

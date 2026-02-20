@@ -4,6 +4,9 @@ import os
 import random
 import gc
 import shutil
+import numpy as np
+import re
+import json
 from typing import List
 from loguru import logger
 from moviepy import (
@@ -20,6 +23,8 @@ from moviepy import (
 )
 from moviepy.video.tools.subtitles import SubtitlesClip
 from PIL import ImageFont
+import imageio_ffmpeg
+
 
 from app.models import const
 from app.models.schema import (
@@ -31,7 +36,8 @@ from app.models.schema import (
 )
 from app.services.utils import video_effects
 from app.utils import utils
-from app.utils import hook_generator
+from app.utils import hook_generator, number_counter, progress_overlay
+from app.services.utils import video_effects, pacing, sfx
 
 class SubClippedVideoClip:
     def __init__(self, file_path, start_time=None, end_time=None, width=None, height=None, duration=None):
@@ -125,10 +131,29 @@ def combine_videos(
     video_transition_mode: VideoTransitionMode = None,
     max_clip_duration: int = 5,
     threads: int = 2,
+    pacing_mode: str = "default",
+    transition_speed: float = 0.5,
+    apply_ken_burns: bool = True,
+    color_enhancement: bool = True,
+    enable_pattern_interrupts: bool = True,
 ) -> str:
+    audio_clip = AudioFileClip(audio_file)
+    # Ensure Enums
+    if isinstance(video_aspect, str):
+        video_aspect = VideoAspect(video_aspect)
+    if isinstance(video_concat_mode, str):
+        video_concat_mode = VideoConcatMode(video_concat_mode)
+    if isinstance(video_transition_mode, str):
+         # Handle None case if necessary, but str usually means valid value
+         # Unless it's "None" string?
+         if video_transition_mode == "None":
+             video_transition_mode = VideoTransitionMode.none
+         else:
+             video_transition_mode = VideoTransitionMode(video_transition_mode)
+             
     if video_transition_mode is None:
         video_transition_mode = VideoTransitionMode.none
-    audio_clip = AudioFileClip(audio_file)
+
     audio_duration = audio_clip.duration
     logger.info(f"audio duration: {audio_duration} seconds")
     # Required duration of each clip
@@ -141,40 +166,122 @@ def combine_videos(
     video_width, video_height = aspect.to_resolution()
 
     processed_clips = []
-    subclipped_items = []
-    video_duration = 0
-    for video_path in video_paths:
-        clip = VideoFileClip(video_path)
-        clip_duration = clip.duration
-        clip_w, clip_h = clip.size
-        close_clip(clip)
-        
-        start_time = 0
-
-        while start_time < clip_duration:
-            end_time = min(start_time + max_clip_duration, clip_duration)            
-            if clip_duration - start_time >= 1.5:
-                subclipped_items.append(SubClippedVideoClip(file_path= video_path, start_time=start_time, end_time=end_time, width=clip_w, height=clip_h))
-            start_time = end_time    
-            if video_concat_mode.value == VideoConcatMode.sequential.value:
-                break
-
-    # random subclipped_items order
-    if video_concat_mode.value == VideoConcatMode.random.value:
-        random.shuffle(subclipped_items)
-        
-    logger.debug(f"total subclipped items: {len(subclipped_items)}")
     
-    # Add downloaded clips over and over until the duration of the audio (max_duration) has been reached
-    for i, subclipped_item in enumerate(subclipped_items):
-        if video_duration > audio_duration:
-            break
+    # T4-1: Init Pattern Interrupt state
+    last_interrupt_time = 0.0
+    available_effects = [
+        video_effects.screen_shake,
+        video_effects.flash_effect,
+        video_effects.chromatic_aberration,
+        video_effects.glitch_effect,
+        video_effects.zoom_burst,
+    ]
+    
+    # T4-2: Pacing Curve (Chop on Demand)
+    # Instead of pre-chopping, we Select -> Chop -> Add based on current timeline position.
+    
+    # helper to track source usage if sequential
+    source_states = {}
+    for vp in video_paths:
+        try:
+            with VideoFileClip(vp) as c:
+               dur = c.duration
+               size = c.size
+            source_states[vp] = {
+                "duration": dur,
+                "current_pos": 0.0,
+                "size": size
+            }
+        except Exception as e:
+            logger.error(f"failed to read video {vp}: {e}")
+            
+    if not source_states:
+        raise ValueError("No valid video sources found")
+
+    video_duration = 0.0
+    subclipped_items = []
+    seq_idx = 0
+    
+    while video_duration < audio_duration:
+        req_dur = pacing.get_clip_duration(pacing_mode, video_duration, audio_duration)
+        req_dur = min(req_dur, max_clip_duration)
+        if req_dur < 1.0: req_dur = 1.0
+        
+        selected_path = None
+        clip_start, clip_end = 0.0, 0.0
+        
+        if video_concat_mode.value == VideoConcatMode.random.value:
+             selected_path = random.choice(video_paths)
+             v_info = source_states.get(selected_path)
+             if not v_info: continue
+             
+             max_start = max(0, v_info["duration"] - req_dur)
+             clip_start = random.uniform(0, max_start)
+             clip_end = min(clip_start + req_dur, v_info["duration"])
+             
+        else: # Sequential
+             # Try current sequence video
+             found = False
+             for _ in range(len(video_paths) * 2): # Try to find a valid segment
+                 selected_path = video_paths[seq_idx % len(video_paths)]
+                 v_info = source_states.get(selected_path)
+                 if not v_info:
+                     seq_idx += 1
+                     continue
+
+                 if v_info["current_pos"] < v_info["duration"] - 0.5:
+                     clip_start = v_info["current_pos"]
+                     clip_end = min(clip_start + req_dur, v_info["duration"])
+                     v_info["current_pos"] = clip_end
+                     found = True
+                     break
+                 else:
+                     # Exhausted, move next and reset this one for valid looping
+                     v_info["current_pos"] = 0
+                     seq_idx += 1
+             
+             if not found:
+                 # Fallback
+                 selected_path = video_paths[0]
+                 v_info = source_states[selected_path]
+                 clip_start = 0
+                 clip_end = min(req_dur, v_info["duration"])
+
+        if selected_path:
+             v_info = source_states[selected_path]
+             dur = clip_end - clip_start
+             if dur > 0.1:
+                 subclipped_items.append(SubClippedVideoClip(
+                     file_path=selected_path,
+                     start_time=clip_start,
+                     end_time=clip_end,
+                     width=v_info["size"][0],
+                     height=v_info["size"][1]
+                 ))
+                 video_duration += dur
+
+    logger.debug(f"generated {len(subclipped_items)} subclips using {pacing_mode} pacing")
+    
+    # Assign to processed_clips directly as we already filled the duration
+    processed_clips = subclipped_items
+
+    # Process the generated clips
+    video_duration = 0.0 # Track processed duration
+    for i, subclipped_item in enumerate(processed_clips):
+        # No need for `if video_duration > audio_duration: break` here, as `processed_clips` is already sized.
         
         logger.debug(f"processing clip {i+1}: {subclipped_item.width}x{subclipped_item.height}, current duration: {video_duration:.2f}s, remaining: {audio_duration - video_duration:.2f}s")
         
         try:
             clip = VideoFileClip(subclipped_item.file_path).subclipped(subclipped_item.start_time, subclipped_item.end_time)
             clip_duration = clip.duration
+            
+            # T1-5: Color Enhancement (Auto-normalization/Boost)
+            if color_enhancement:
+                # Apply slight saturation boost and contrast
+                clip = clip.with_effects([vfx.MultiplyColor(1.05)]) # Slight localized brightness/saturation boost
+                # Note: True auto-normalization is expensive. This heuristic improves vibrancy.
+
             # Not all videos are same size, so we need to resize them
             clip_w, clip_h = clip.size
             if clip_w != video_width or clip_h != video_height:
@@ -193,37 +300,104 @@ def combine_videos(
                     new_width = int(clip_w * scale_factor)
                     new_height = int(clip_h * scale_factor)
 
-                    background = ColorClip(size=(video_width, video_height), color=(0, 0, 0)).with_duration(clip_duration)
+                    # T0-1: Use blurred background instead of black bars
+                    try:
+                        from PIL import Image, ImageFilter
+                        bg_clip = clip.resized(new_size=(video_width, video_height))
+                        def blur_frame(get_frame, t):
+                            frame = get_frame(t)
+                            img = Image.fromarray(frame)
+                            blurred = img.filter(ImageFilter.GaussianBlur(radius=30))
+                            return np.array(blurred)
+                        bg_clip = bg_clip.transform(blur_frame).with_duration(clip_duration)
+                    except Exception as blur_err:
+                        logger.warning(f"blur background failed, falling back to black: {blur_err}")
+                        bg_clip = ColorClip(size=(video_width, video_height), color=(0, 0, 0)).with_duration(clip_duration)
+
                     clip_resized = clip.resized(new_size=(new_width, new_height)).with_position("center")
-                    clip = CompositeVideoClip([background, clip_resized])
-                    
+                    clip = CompositeVideoClip([bg_clip, clip_resized])
+            
+            # T1-1: Ken Burns Effect
+            if apply_ken_burns:
+                # Apply to static images or clips where we want dynamic motion
+                # Since we don't know if source is static, we apply subtly to add production value
+                clip = video_effects.ken_burns_effect(clip, zoom_factor=1.1, pan_direction="random")
+
             shuffle_side = random.choice(["left", "right", "top", "bottom"])
             if video_transition_mode.value == VideoTransitionMode.none.value:
                 clip = clip
             elif video_transition_mode.value == VideoTransitionMode.fade_in.value:
-                clip = video_effects.fadein_transition(clip, 1)
+                clip = video_effects.fadein_transition(clip, transition_speed)
             elif video_transition_mode.value == VideoTransitionMode.fade_out.value:
-                clip = video_effects.fadeout_transition(clip, 1)
+                clip = video_effects.fadeout_transition(clip, transition_speed)
             elif video_transition_mode.value == VideoTransitionMode.slide_in.value:
-                clip = video_effects.slidein_transition(clip, 1, shuffle_side)
+                clip = video_effects.slidein_transition(clip, transition_speed, shuffle_side)
             elif video_transition_mode.value == VideoTransitionMode.slide_out.value:
-                clip = video_effects.slideout_transition(clip, 1, shuffle_side)
+                clip = video_effects.slideout_transition(clip, transition_speed, shuffle_side)
+            elif video_transition_mode.value == VideoTransitionMode.whip_pan.value:
+                clip = video_effects.whip_pan_transition(clip, transition_speed)
+            elif video_transition_mode.value == VideoTransitionMode.zoom.value:
+                clip = video_effects.zoom_transition(clip, transition_speed)
             elif video_transition_mode.value == VideoTransitionMode.shuffle.value:
                 transition_funcs = [
-                    lambda c: video_effects.fadein_transition(c, 1),
-                    lambda c: video_effects.fadeout_transition(c, 1),
-                    lambda c: video_effects.slidein_transition(c, 1, shuffle_side),
-                    lambda c: video_effects.slideout_transition(c, 1, shuffle_side),
+                    lambda c: video_effects.fadein_transition(c, transition_speed),
+                    lambda c: video_effects.fadeout_transition(c, transition_speed),
+                    lambda c: video_effects.slidein_transition(c, transition_speed, shuffle_side),
+                    lambda c: video_effects.slideout_transition(c, transition_speed, shuffle_side),
+                    lambda c: video_effects.whip_pan_transition(c, transition_speed),
+                    lambda c: video_effects.zoom_transition(c, transition_speed),
                 ]
                 shuffle_transition = random.choice(transition_funcs)
                 clip = shuffle_transition(clip)
 
-            if clip.duration > max_clip_duration:
-                clip = clip.subclipped(0, max_clip_duration)
-                
-            # wirte clip to temp file
+            # T4-1: Pattern Interrupts
+            # Check if we should apply effect (every 5-8s)
+            if enable_pattern_interrupts: # Changed from params.enable_pattern_interrupts
+                # video_duration is current start time
+                interval = random.uniform(5.0, 8.0)
+                if (video_duration - last_interrupt_time) > interval:
+                     effect_func = random.choice(available_effects)
+                     try:
+                         # Apply effect
+                         logger.info(f"applying pattern interrupt {effect_func.__name__} at {video_duration:.2f}s")
+                         affected_clip = effect_func(clip)
+                         
+                         # Ensure audio is preserved
+                         if clip.audio and not affected_clip.audio:
+                             affected_clip = affected_clip.with_audio(clip.audio)
+                         
+                         clip = affected_clip
+                         last_interrupt_time = video_duration
+                     except Exception as e:
+                         logger.warning(f"failed to apply pattern interrupt: {e}")
+
+            # T3-3: Auto-SFX on transition
+
+            # Remove original audio (stock noise)
+            clip = clip.without_audio()
+            
+            # Add SFX if transition occurred (simple check: mode is not None)
+            if video_transition_mode and video_transition_mode != VideoTransitionMode.none:
+                sfx_file = sfx.get_random_transition_sfx()
+                if sfx_file:
+                    try:
+                        sfx_audio = AudioFileClip(sfx_file)
+                        # Ensure SFX doesn't exceed clip duration (though rare for short SFX)
+                        if sfx_audio.duration > clip.duration:
+                             sfx_audio = sfx_audio.subclipped(0, clip.duration)
+                        
+                        # Set audio (replaces existing, which is None/Silent now)
+                        clip = clip.with_audio(sfx_audio)
+                    except Exception as sfx_err:
+                         logger.warning(f"failed to add sfx: {sfx_err}")
+
+            # T1-2: Pacing logic guarantees duration, but if filters changed it, ensure it's correct
+            # Wait, Ken Burns uses transform which preserves duration. Transitions might add effects.
+            # No clipping needed unless duration grew unexpectedly.
+            
+            # write clip to temp file (T0-2: bitrate control)
             clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
-            clip.write_videofile(clip_file, logger=None, fps=fps, codec=video_codec)
+            clip.write_videofile(clip_file, logger=None, fps=fps, codec=video_codec, bitrate="8000k")
             
             close_clip(clip)
         
@@ -244,8 +418,10 @@ def combine_videos(
             video_duration += clip.duration
         logger.info(f"video duration: {video_duration:.2f}s, audio duration: {audio_duration:.2f}s, looped {len(processed_clips)-len(base_clips)} clips")
      
-    # merge video clips progressively, avoid loading all videos at once to avoid memory overflow
-    logger.info("starting clip merging process")
+    # T0-4: One-pass concatenation using FFmpeg concat demuxer
+    # Instead of iteratively merging clips (N-1 re-encodes = quality loss),
+    # use FFmpeg's concat demuxer for a single-pass merge.
+    logger.info(f"starting one-pass clip merge ({len(processed_clips)} clips)")
     if not processed_clips:
         logger.error("no clips available for merging")
         raise ValueError("No valid video clips were processed successfully. Check if download failed or files are corrupted.")
@@ -254,56 +430,56 @@ def combine_videos(
     if len(processed_clips) == 1:
         logger.info("using single clip directly")
         shutil.copy(processed_clips[0].file_path, combined_video_path)
-        delete_files(processed_clips)
+        delete_files([processed_clips[0].file_path])
         logger.info("video combining completed")
         return combined_video_path
     
-    # create initial video file as base
-    base_clip_path = processed_clips[0].file_path
-    temp_merged_video = f"{output_dir}/temp-merged-video.mp4"
-    temp_merged_next = f"{output_dir}/temp-merged-next.mp4"
+    # Write concat list file for FFmpeg
+    concat_list_path = f"{output_dir}/concat_list.txt"
+    with open(concat_list_path, "w", encoding="utf-8") as f:
+        for clip in processed_clips:
+            # FFmpeg concat demuxer requires forward slashes and escaped quotes
+            safe_path = clip.file_path.replace("\\", "/")
+            f.write(f"file '{safe_path}'\n")
     
-    # copy first clip as initial merged video
-    shutil.copy(base_clip_path, temp_merged_video)
-    
-    # merge remaining video clips one by one
-    for i, clip in enumerate(processed_clips[1:], 1):
-        logger.info(f"merging clip {i}/{len(processed_clips)-1}, duration: {clip.duration:.2f}s")
-        
-        try:
-            # load current base video and next clip to merge
-            base_clip = VideoFileClip(temp_merged_video)
-            next_clip = VideoFileClip(clip.file_path)
-            
-            # merge these two clips
-            merged_clip = concatenate_videoclips([base_clip, next_clip])
+    # Single-pass merge via FFmpeg concat demuxer (stream copy = no re-encode)
+    import subprocess
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    try:
+        ffmpeg_cmd = [
+            ffmpeg_exe, "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_list_path,
+            "-c", "copy",
+            combined_video_path,
+        ]
+        logger.info(f"running FFmpeg concat: {' '.join(ffmpeg_cmd)}")
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            logger.warning(f"FFmpeg concat failed (rc={result.returncode}): {result.stderr[:500]}")
+            logger.info("falling back to moviepy concatenation")
+            # Fallback: load all clips and concat via moviepy (single write)
+            all_clips = [VideoFileClip(c.file_path) for c in processed_clips]
+            merged = concatenate_videoclips(all_clips)
 
-            # save merged result to temp file
-            merged_clip.write_videofile(
-                filename=temp_merged_next,
+            merged.write_videofile(
+                combined_video_path,
                 threads=threads,
-                logger=None,
-                temp_audiofile_path=output_dir,
-                audio_codec=audio_codec,
+                audio_codec="aac",
                 fps=fps,
+                bitrate="8000k",
             )
-            close_clip(base_clip)
-            close_clip(next_clip)
-            close_clip(merged_clip)
-            
-            # replace base file with new merged file
-            delete_files(temp_merged_video)
-            os.rename(temp_merged_next, temp_merged_video)
-            
-        except Exception as e:
-            logger.error(f"failed to merge clip: {str(e)}")
-            continue
-    
-    # after merging, rename final result to target file name
-    os.rename(temp_merged_video, combined_video_path)
+            for c in all_clips:
+                close_clip(c)
+            close_clip(merged)
+    except Exception as e:
+        logger.error(f"one-pass merge failed: {str(e)}")
+        raise
     
     # clean temp files
     clip_files = [clip.file_path for clip in processed_clips]
+    clip_files.append(concat_list_path)
     delete_files(clip_files)
             
     logger.info("video combining completed")
@@ -411,20 +587,46 @@ def generate_video(
             font=font_path,
             font_size=params.font_size,
             color=params.text_fore_color,
-            bg_color=params.text_background_color,
+            bg_color=None, # T2-2: We handle background manually
             stroke_color=params.stroke_color,
             stroke_width=params.stroke_width,
             # interline=interline,
             # size=size,
         )
+        
+        # T2-2: Subtitle background box
+        bg_color = params.text_background_color
+        if bg_color:
+            if isinstance(bg_color, bool):
+                 bg_color = "#000000" # Default black if just 'True'
+            
+            # Create rounded box
+            padding = 20
+            w, h = _clip.size
+            bg_size = (w + padding, h + padding)
+            bg_clip = video_effects.create_rounded_box_clip(bg_size, color=bg_color, radius=15, opacity=0.8)
+            
+            # Center text on background
+            _clip = CompositeVideoClip([bg_clip, _clip.with_position("center")])
+
         duration = subtitle_item[0][1] - subtitle_item[0][0]
         _clip = _clip.with_start(subtitle_item[0][0])
         _clip = _clip.with_end(subtitle_item[0][1])
         _clip = _clip.with_duration(duration)
+        # T0-5: Platform-aware safe zone positioning
+        from app.utils.safe_zones import get_safe_subtitle_y
+        if params.subtitle_mode == "word":
+             # Apply pop-in for word level animation
+             _clip = video_effects.pop_in_effect(_clip, duration=0.1)
+
+        target_platform = getattr(params, "target_platform", "default") or "default"
+        
         if params.subtitle_position == "bottom":
-            _clip = _clip.with_position(("center", video_height * 0.95 - _clip.h))
+            safe_y = get_safe_subtitle_y(video_height, _clip.h, "bottom", target_platform)
+            _clip = _clip.with_position(("center", safe_y))
         elif params.subtitle_position == "top":
-            _clip = _clip.with_position(("center", video_height * 0.05))
+            safe_y = get_safe_subtitle_y(video_height, _clip.h, "top", target_platform)
+            _clip = _clip.with_position(("center", safe_y))
         elif params.subtitle_position == "custom":
             # Ensure the subtitle is fully within the screen bounds
             margin = 10  # Additional margin, in pixels
@@ -439,9 +641,9 @@ def generate_video(
             _clip = _clip.with_position(("center", "center"))
         return _clip
 
-    video_clip = VideoFileClip(video_path).without_audio()
+    video_clip = VideoFileClip(video_path) # Keep audio (SFX from combine_videos)
     audio_clip = AudioFileClip(audio_path).with_effects(
-        [afx.MultiplyVolume(params.voice_volume)]
+        [afx.AudioNormalize(), afx.MultiplyVolume(params.voice_volume)]
     )
 
     def make_textclip(text):
@@ -452,30 +654,135 @@ def generate_video(
         )
 
     if subtitle_path and os.path.exists(subtitle_path):
-        sub = SubtitlesClip(
-            subtitles=subtitle_path, encoding="utf-8", make_textclip=make_textclip
-        )
+        subtitle_items = []
+        json_path = subtitle_path.replace(".srt", ".json")
+        
+        # T2-1: check for word-level mode and available data
+        if params.subtitle_mode == "word" and os.path.exists(json_path):
+             try:
+                 with open(json_path, "r", encoding="utf-8") as f:
+                     word_data = json.load(f)
+                 # Convert to format expected by create_text_clip: ((start, end), text)
+                 for w in word_data:
+                     subtitle_items.append(((w['start'], w['end']), w['word']))
+                 logger.info(f"using word-level subtitles: {len(subtitle_items)} words")
+             except Exception as e:
+                 logger.error(f"failed to load subtitle json: {e}, falling back to srt")
+                 
+        if not subtitle_items:
+            # Fallback to SRT (Phrase level)
+            sub = SubtitlesClip(
+                subtitles=subtitle_path, encoding="utf-8", make_textclip=make_textclip
+            )
+            subtitle_items = sub.subtitles
+
         text_clips = []
-        for item in sub.subtitles:
+        for item in subtitle_items:
             clip = create_text_clip(subtitle_item=item)
             text_clips.append(clip)
-        video_clip = CompositeVideoClip([video_clip, *text_clips])
+    # T4-4: Number Counter Animation
+    overlay_clips = [] # Initialize overlay_clips here for number counter and other overlays
+    if params.enable_number_counter and subtitle_path and os.path.exists(subtitle_path):
+        try:
+            # 1. Parse subtitles to find timings
+            from app.services import subtitle
+            subs = subtitle.file_to_subtitles(subtitle_path)
+            
+            # 2. Extract numbers
+            # script is not readily available here as raw text, but we can search within subtitles
+            numbers = number_counter.extract_numbers_from_script(None, subs)
+            
+            # 3. Create Overlays
+            # Limit number of counters to avoid clutter? Or show all >= 100.
+            for num in numbers:
+                logger.info(f"adding counter for {num['value']} at {num['start']}s")
+                # Create animation
+                # Color from params
+                counter_clip = number_counter.create_counter_clip(
+                    target_number=num['value'],
+                    duration=1.5, # Fixed duration or dynamic?
+                    font_path=font_path,
+                    color=params.text_fore_color
+                )
+                
+                # Position: Center? Or slightly above center?
+                # Hook is at 0.15 * h (top). Subtitles at bottom.
+                # Center is safe.
+                counter_clip = counter_clip.with_position("center")
+                counter_clip = counter_clip.with_start(num['start'])
+                
+                # Crossfade in/out
+                counter_clip = counter_clip.with_effects([vfx.CrossFadeIn(0.2), vfx.CrossFadeOut(0.2)])
+                
+                overlay_clips.append(counter_clip)
+                
+        except Exception as e:
+            logger.error(f"failed to add number counters: {e}")
+            
+    # T4-5: Progress Bar Overlay
+    if params.enable_progress_bar and subtitle_path and os.path.exists(subtitle_path):
+        try:
+             # Use parsed subtitles from earlier if available, or load again
+             # We loaded 'subs' inside number counter block. But that block depends on enable_number_counter.
+             # So we should load subs again or lift variable.
+             from app.services import subtitle
+             subs_for_progress = subtitle.file_to_subtitles(subtitle_path)
+             
+             bar_clip = progress_overlay.create_progress_bar_clip(
+                 video_size=(video_clip.w, video_clip.h),
+                 subtitles=subs_for_progress,
+                 video_duration=video_clip.duration,
+                 fill_color=params.text_fore_color
+             )
+             
+             if bar_clip:
+                 # Crossfade in/out
+                 bar_clip = bar_clip.with_effects([vfx.CrossFadeIn(0.5), vfx.CrossFadeOut(0.5)])
+                 overlay_clips.append(bar_clip)
+                 logger.info("added progress bar overlay")
+        except Exception as e:
+            logger.error(f"failed to add progress bar: {e}")
 
+    # Combine all
+    video_clip = CompositeVideoClip([video_clip, *text_clips, *overlay_clips])
+
+    # Audio Mixing: Voice + BGM + SFX
+    audio_source = [audio_clip] # Start with normalized voice
+    
+    # 1. Add SFX (from video track) if present
+    if video_clip.audio:
+        audio_source.append(video_clip.audio)
+
+    # 2. Add BGM if configured
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
     if bgm_file:
         try:
-            bgm_clip = AudioFileClip(bgm_file).with_effects(
+            bgm_clip = AudioFileClip(bgm_file)
+            if bgm_clip.duration and bgm_clip.duration > video_clip.duration:
+                bgm_clip = bgm_clip.subclipped(0, video_clip.duration)
+            else:
+                bgm_clip = bgm_clip.with_effects([afx.AudioLoop(duration=video_clip.duration)])
+                
+            bgm_clip = bgm_clip.with_effects(
                 [
                     afx.MultiplyVolume(params.bgm_volume),
+                    afx.AudioFadeIn(2),
                     afx.AudioFadeOut(3),
-                    afx.AudioLoop(duration=video_clip.duration),
                 ]
             )
-            audio_clip = CompositeAudioClip([audio_clip, bgm_clip])
+            audio_source.append(bgm_clip)
         except Exception as e:
             logger.error(f"failed to add bgm: {str(e)}")
 
-    video_clip = video_clip.with_audio(audio_clip)
+    # Composite audio
+    try:
+        final_audio = CompositeAudioClip(audio_source)
+        final_audio = final_audio.with_duration(video_clip.duration)
+        video_clip = video_clip.with_audio(final_audio)
+    except Exception as e:
+        logger.error(f"failed to composite audio: {str(e)}")
+        # Fallback to just voice if mix fails
+        video_clip = video_clip.with_audio(audio_clip)
 
     # Watermark overlay
     watermark_clip = None
@@ -519,7 +826,11 @@ def generate_video(
     # Hook text overlay (first 3 seconds)
     overlay_clips = [video_clip]
     try:
-        hook_text = hook_generator.get_hook_text(category="General", subject=params.video_subject)
+        hook_text = hook_generator.get_hook_text(
+            category=params.video_subject, 
+            subject=params.video_subject,
+            auto_optimize=params.auto_optimize
+        )
         if hook_text:
             hook_font = font_path if font_path else "Arial"
             hook_clip = TextClip(
@@ -532,7 +843,9 @@ def generate_video(
             )
             hook_clip = hook_clip.with_start(0).with_duration(3)
             hook_clip = hook_clip.with_position(("center", video_height * 0.15))
-            hook_clip = hook_clip.with_effects([vfx.CrossFadeIn(0.3), vfx.CrossFadeOut(0.5)])
+            # T2-5: Hook pop-in animation
+            hook_clip = video_effects.pop_in_effect(hook_clip, duration=0.5)
+            hook_clip = hook_clip.with_effects([vfx.CrossFadeOut(0.5)])
             overlay_clips.append(hook_clip)
             logger.info(f"  ⑦ hook: {hook_text}")
     except Exception as e:
@@ -563,6 +876,7 @@ def generate_video(
     if len(overlay_clips) > 1:
         video_clip = CompositeVideoClip(overlay_clips)
 
+    # T0-2: bitrate control for final output
     video_clip.write_videofile(
         output_file,
         audio_codec=audio_codec,
@@ -570,6 +884,7 @@ def generate_video(
         threads=params.n_threads or 2,
         logger=None,
         fps=fps,
+        bitrate="8000k",
     )
     video_clip.close()
     del video_clip

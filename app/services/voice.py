@@ -36,9 +36,6 @@ class SubMaker:
         self.subs.append(text)
         self.offset.append((offset, offset + duration))
 
-from moviepy.video.tools import subtitles
-from moviepy.audio.io.AudioFileClip import AudioFileClip
-
 from app.config import config
 from app.utils import utils
 
@@ -1799,6 +1796,7 @@ def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
             with open(subtitle_file, "w", encoding="utf-8") as file:
                 file.write("\n".join(sub_items) + "\n")
             try:
+                from moviepy.video.tools import subtitles
                 sbs = subtitles.file_to_subtitles(subtitle_file, encoding="utf-8")
                 duration = max([tb for ((ta, tb), txt) in sbs])
                 logger.info(
@@ -1833,6 +1831,7 @@ def _get_audio_duration_from_mp3(mp3_file: str) -> float:
         return 0.0
 
     try:
+        from moviepy.audio.io.AudioFileClip import AudioFileClip
         # Use moviepy to get the duration of the MP3 file
         with AudioFileClip(mp3_file) as audio:
             return audio.duration  # Duration in seconds

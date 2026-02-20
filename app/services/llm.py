@@ -385,24 +385,39 @@ Category: {category if category else "Random Mixed"}
 def generate_script(
     video_subject: str, language: str = "", paragraph_number: int = 1
 ) -> str:
+    # T0-6: Enhanced prompt for high-retention short video scripts
     prompt = f"""
-# Role: Video Script Generator
+# Role: Viral Short Video Script Generator
 
 ## Goals:
-Generate a script for a video, depending on the subject of the video.
+Generate an engaging, high-retention script for a short video (30-90 seconds) on the given subject.
+
+## Script Structure:
+1. HOOK (first sentence): Start with a bold claim, surprising fact, or provocative question. This must grab attention in under 2 seconds.
+2. SETUP (next 2-3 sentences): Build context quickly with short, punchy sentences.
+3. ESCALATION (body): Present the main content with increasing intensity. Use rhetorical questions and micro-cliffhangers between paragraphs.
+4. PAYOFF (ending): Deliver a satisfying conclusion or surprising twist. End with a thought-provoking statement.
+
+## Pacing Rules:
+1. Keep sentences SHORT — maximum 12 words per sentence. 
+2. Include at least ONE rhetorical question per paragraph.
+3. Use micro-cliffhangers: "But here's what most people don't know..." / "And that's when things got interesting..."
+4. Vary sentence length: alternate between very short (3-5 words) and medium (8-12 words) for rhythm.
+5. Use power words: "secret", "shocking", "incredible", "unbelievable", "impossible" where natural.
 
 ## Constrains:
-1. the script is to be returned as a string with the specified number of paragraphs.
-2. do not under any circumstance reference this prompt in your response.
-3. get straight to the point, don't start with unnecessary things like, "welcome to this video".
-4. you must not include any type of markdown or formatting in the script, never use a title.
-5. only return the raw content of the script.
-6. do not include "voiceover", "narrator" or similar indicators of what should be spoken at the beginning of each paragraph or line.
-7. you must not mention the prompt, or anything about the script itself. also, never talk about the amount of paragraphs or lines. just write the script.
-8. respond in the same language as the video subject.
-9. IMPORTANT: All content must be safe and appropriate for children under 10 years old. Do not include any violence, horror, sexual content, drugs, alcohol, profanity, gambling, weapons, or any disturbing or inappropriate themes. Keep the tone positive, educational, and family-friendly.
+1. Return the script as a string with the specified number of paragraphs.
+2. Do NOT reference this prompt in your response.
+3. Get straight to the point — no "welcome to this video" or similar introductions.
+4. No markdown formatting, no titles, no headers.
+5. Only return raw script content.
+6. Do NOT include "voiceover", "narrator" or similar indicators.
+7. Never mention the prompt, script structure, or paragraph count.
+8. Respond in the same language as the video subject.
+9. Use a conversational, energetic tone — as if talking to a friend.
+10. IMPORTANT: All content must be safe and appropriate for ALL audiences. No violence, horror, sexual content, drugs, alcohol, profanity, gambling, weapons, or disturbing themes.
 
-# Initialization:
+# Input:
 - video subject: {video_subject}
 - number of paragraphs: {paragraph_number}
 """.strip()

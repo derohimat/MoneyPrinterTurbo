@@ -133,6 +133,19 @@ def run_in_background(func, *args, **kwargs):
     return thread
 
 
+
+def srt_time_to_seconds(time_str: str) -> float:
+    """
+    Convert SRT time string (00:00:01,500) to seconds (1.5).
+    """
+    try:
+        time_str = time_str.replace(",", ".")
+        hours, minutes, seconds = time_str.split(":")
+        seconds, milliseconds = seconds.split(".")
+        return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(milliseconds) / 1000.0
+    except Exception:
+        return 0.0
+
 def time_convert_seconds_to_hmsm(seconds) -> str:
     hours = int(seconds // 3600)
     seconds = seconds % 3600

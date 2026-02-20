@@ -42,9 +42,41 @@ def save_config():
         _cfg["ui"] = ui
         f.write(toml.dumps(_cfg))
 
+def reload():
+    global _cfg, app, hide_config, whisper, proxy, azure, siliconflow, voicebox, veo, ui
+    global log_level, listen_host, listen_port, project_name, project_description, project_version
+    
+    _cfg = load_config()
+    app.clear()
+    app.update(_cfg.get("app", {}))
+    
+    hide_config = app.get("hide_config", False)
+    
+    whisper.clear()
+    whisper.update(_cfg.get("whisper", {}))
+    
+    proxy.clear()
+    proxy.update(_cfg.get("proxy", {}))
+    
+    azure.clear()
+    azure.update(_cfg.get("azure", {}))
+    
+    siliconflow.clear()
+    siliconflow.update(_cfg.get("siliconflow", {}))
+    
+    voicebox.clear()
+    voicebox.update(_cfg.get("voicebox", {}))
+    
+    veo.clear()
+    veo.update(_cfg.get("veo", {}))
+    
+    ui.clear()
+    ui.update(_cfg.get("ui", { "hide_log": False }))
+
 
 _cfg = load_config()
 app = _cfg.get("app", {})
+hide_config = app.get("hide_config", False)
 whisper = _cfg.get("whisper", {})
 proxy = _cfg.get("proxy", {})
 azure = _cfg.get("azure", {})

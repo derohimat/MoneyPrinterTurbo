@@ -70,12 +70,12 @@ Picwish focuses on the **image processing field**, providing a rich set of **ima
 ### Future Plans 📅
 
 - [ ] GPT-SoVITS dubbing support
-- [ ] Optimize voice synthesis using large models for more natural and emotionally rich voice output
-- [ ] Add video transition effects for a smoother viewing experience
-- [ ] Add more video material sources, improve the matching between video materials and script
+- [x] Optimize voice synthesis using large models for more natural and emotionally rich voice output (SiliconFlow/CosyVoice2, Gemini)
+- [x] Add video transition effects for a smoother viewing experience
+- [x] Add more video material sources, improve the matching between video materials and script (Pexels, Pixabay, Local)
 - [ ] Add video length options: short, medium, long
 - [ ] Support more voice synthesis providers, such as OpenAI TTS
-- [ ] Automate upload to YouTube platform
+- [x] Automate upload to YouTube platform
 
 ## Video Demos 📺
 

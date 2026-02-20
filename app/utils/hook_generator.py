@@ -98,17 +98,35 @@ CTA_TEMPLATES = [
 ]
 
 
-def get_hook_text(category: str = "General", subject: str = "") -> str:
+def get_hook_text(category: str = "General", subject: str = "", auto_optimize: bool = True) -> str:
     """
     Get a compelling hook text for the video intro.
     
     Args:
         category: Video category
         subject: Video subject (for context)
+        auto_optimize: If True, prefer high-performing hooks from analytics DB.
     
     Returns:
         Hook text string
     """
+    # T6-6: Auto-feedback loop
+    if auto_optimize:
+        try:
+            from app.utils import analytics_db
+            top_hooks = analytics_db.get_hooks_by_category(category, limit=3, min_samples=3)
+            # Filter hooks with retention > 0.5 (50%)
+            proven_hooks = [h for h in top_hooks if h.get("avg_retention", 0) > 0.5]
+            
+            if proven_hooks:
+                # 70% chance to pick a proven hook, 30% chance to explore new ones (Epsilon-Greedy like)
+                if random.random() < 0.7:
+                    selected = random.choice(proven_hooks)["hook_template"]
+                    logger.info(f"Auto-Feedback: Selected proven hook for '{category}': {selected}")
+                    return selected
+        except Exception as e:
+            logger.warning(f"Auto-Feedback failed: {e}")
+
     templates = HOOK_TEMPLATES.get(category, GENERIC_HOOKS)
     hook = random.choice(templates)
     logger.info(f"Hook selected for '{category}': {hook}")
