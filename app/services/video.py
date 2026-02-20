@@ -451,6 +451,7 @@ def combine_videos(
             "-f", "concat",
             "-safe", "0",
             "-i", concat_list_path,
+            "-t", str(audio_duration),
             "-c", "copy",
             combined_video_path,
         ]
@@ -462,6 +463,8 @@ def combine_videos(
             # Fallback: load all clips and concat via moviepy (single write)
             all_clips = [VideoFileClip(c.file_path) for c in processed_clips]
             merged = concatenate_videoclips(all_clips)
+            if merged.duration > audio_duration:
+                merged = merged.subclipped(0, audio_duration)
 
             merged.write_videofile(
                 combined_video_path,
@@ -645,6 +648,10 @@ def generate_video(
     audio_clip = AudioFileClip(audio_path).with_effects(
         [afx.AudioNormalize(), afx.MultiplyVolume(params.voice_volume)]
     )
+    
+    # Strictly trim video duration to match the voice length (prevent overflow)
+    if video_clip.duration > audio_clip.duration:
+        video_clip = video_clip.subclipped(0, audio_clip.duration)
 
     def make_textclip(text):
         return TextClip(
@@ -653,6 +660,9 @@ def generate_video(
             font_size=params.font_size,
         )
 
+    text_clips = []
+    overlay_clips = [] # Initialize here so it's globally available for the function
+    
     if subtitle_path and os.path.exists(subtitle_path):
         subtitle_items = []
         json_path = subtitle_path.replace(".srt", ".json")
@@ -680,8 +690,8 @@ def generate_video(
         for item in subtitle_items:
             clip = create_text_clip(subtitle_item=item)
             text_clips.append(clip)
+            
     # T4-4: Number Counter Animation
-    overlay_clips = [] # Initialize overlay_clips here for number counter and other overlays
     if params.enable_number_counter and subtitle_path and os.path.exists(subtitle_path):
         try:
             # 1. Parse subtitles to find timings
@@ -823,31 +833,46 @@ def generate_video(
         watermark_clip = watermark_clip.with_position(wm_pos)
         video_clip = CompositeVideoClip([video_clip, watermark_clip])
 
-    # Hook text overlay (first 3 seconds)
+    # Hook text overlay (dynamic duration and 'burn' styling)
+    # Re-initialize overlay_clips with the fully composited video_clip (which now contains subtitles and base overlays)
     overlay_clips = [video_clip]
     try:
-        hook_text = hook_generator.get_hook_text(
-            category=params.video_subject, 
-            subject=params.video_subject,
-            auto_optimize=params.auto_optimize
-        )
+        hook_text = getattr(params, "hook_text", "")
+        # Fallback if not generated earlier
+        if not hook_text and getattr(params, "enable_hook", False):
+            hook_text = hook_generator.get_hook_text(
+                category=params.video_subject, 
+                subject=params.video_subject,
+                auto_optimize=getattr(params, "auto_optimize", True)
+            )
+            
         if hook_text:
+            hook_duration = getattr(params, "hook_duration", 3.0)
             hook_font = font_path if font_path else "Arial"
+            
+            # Spectacular "Burn" Styling: Larger, bright yellow/orange gradient feel
             hook_clip = TextClip(
                 text=hook_text,
                 font=hook_font,
-                font_size=max(36, int(params.font_size * 0.65)),
-                color="#FFFFFF",
-                stroke_color="#000000",
-                stroke_width=2,
+                font_size=max(50, int(params.font_size * 0.9)), # Significantly larger for impact
+                color="#FFFF00", # Yellow
+                stroke_color="#FF4500", # OrangeRed stroke
+                stroke_width=3,
+                method="caption",
+                size=(int(video_width * 0.9), None)
             )
-            hook_clip = hook_clip.with_start(0).with_duration(3)
-            hook_clip = hook_clip.with_position(("center", video_height * 0.15))
-            # T2-5: Hook pop-in animation
-            hook_clip = video_effects.pop_in_effect(hook_clip, duration=0.5)
+            hook_clip = hook_clip.with_start(0).with_duration(hook_duration)
+            hook_clip = hook_clip.with_position(("center", "center"))
+            
+            # Apply 'Burn' / dramatic pop-in zoom effect
+            if hasattr(video_effects, "zoom_burst"):
+                hook_clip = video_effects.zoom_burst(hook_clip, duration=0.8, zoom_to=1.15)
+            else:
+                hook_clip = video_effects.pop_in_effect(hook_clip, duration=0.5)
+                
             hook_clip = hook_clip.with_effects([vfx.CrossFadeOut(0.5)])
             overlay_clips.append(hook_clip)
-            logger.info(f"  ⑦ hook: {hook_text}")
+            logger.info(f"  ⑦ hook ('burn' styled, {hook_duration:.1f}s): {hook_text}")
     except Exception as e:
         logger.warning(f"Hook overlay failed (non-critical): {str(e)}")
 

@@ -398,12 +398,13 @@ Generate an engaging, high-retention script for a short video (30-90 seconds) on
 3. ESCALATION (body): Present the main content with increasing intensity. Use rhetorical questions and micro-cliffhangers between paragraphs.
 4. PAYOFF (ending): Deliver a satisfying conclusion or surprising twist. End with a thought-provoking statement.
 
-## Pacing Rules:
+## Pacing & Visual Rules:
 1. Keep sentences SHORT — maximum 12 words per sentence. 
 2. Include at least ONE rhetorical question per paragraph.
 3. Use micro-cliffhangers: "But here's what most people don't know..." / "And that's when things got interesting..."
 4. Vary sentence length: alternate between very short (3-5 words) and medium (8-12 words) for rhythm.
 5. Use power words: "secret", "shocking", "incredible", "unbelievable", "impossible" where natural.
+6. **VISUAL CONTEXT INJECTION**: Strongly imply the setting/era in the text (e.g., mention "ancient stone walls", "golden desert sands", "neon city lights"). This helps our AI later match rich, contextual stock footage to your sentences.
 
 ## Constrains:
 1. Return the script as a string with the specified number of paragraphs.
@@ -497,21 +498,29 @@ def generate_terms(video_subject: str, video_script: str, amount: int = 5, use_f
 # Role: Video Search Terms Generator
 
 ## Goals:
-Generate {amount} highly specific search terms for stock videos, based on the video subject and script.
+Analyze the video subject and script for historical, geographical, and emotional context. Then, generate {amount} highly specific search terms for background stock videos that match this deep context.
 
 ## Constraints:
 1. The search terms must be returned as a JSON-array of strings.
-2. **CRITICAL**: Each search term MUST include the main subject "{video_subject}" or a direct synonym.
-3. **VISUAL FOCUS**: Generate terms that represent **tangible objects** or **visual scenes**.
-   - BAD: "{video_subject} culture", "{video_subject} happiness", "{video_subject} background", "{video_subject} nature"
-   - GOOD: "{video_subject} lantern", "{video_subject} eating dates", "{video_subject} praying hands", "{video_subject} mosque architecture"
-4. Avoid generic words like "video", "footage", "4k", "hd", "scene".
-5. Reply with English search terms only.
-6. All search terms must be safe and appropriate for children.
+2. **CONTEXT AWARENESS**: Before generating terms, analyze the script to understand:
+   - **Time Period**: Is it ancient, modern, futuristic? (e.g., Use "ancient", "historical", "vintage" if applicable).
+   - **Geography/Location**: Where does this take place? (e.g., "desert", "middle east", "jungle", "ocean").
+   - **Mood/Action**: What is the core vibe? (e.g., "peaceful", "crowd", "praying", "chaotic").
+   - Integrate these contextual adjectives with the core nouns.
+3. **CRITICAL: STOCK SEARCH ALGORITHM**: Stock video search engines (like Pexels/Pixabay) DO NOT understand complex sentences or punctuation.
+   - You MUST extract only the **core 1-3 noun keywords** from the subject.
+   - DROP all conversational/filler words (e.g., drop "History of", "How to", "Why did", "Story of").
+   - If the subject has comma/punctuation like "Kabah, Makah", simplify it to "Kabah Makah" or even just "Kaaba Mecca" (use the most common English spelling for better stock results).
+3. **VISUAL FOCUS**: Generate terms that represent **tangible objects** or **visual scenes** related to the script.
+   - BAD (Too long/abstract): "History of Kabah ancient walls", "Makah religious emotion"
+   - GOOD (Punchy Contextual Nouns): "Kaaba Mecca", "Ancient desert pilgrims", "Islamic Architecture", "Middle east desert"
+5. Avoid generic words like "video", "footage", "4k", "hd", "scene".
+6. Reply with English search terms only.
+7. All search terms must be safe and appropriate for children.
 {faceless_instruction}
 
 ## Output Example:
-["{video_subject} celebration dinner", "{video_subject} traditional clothes", "{video_subject} praying", "{video_subject} family gathering"]
+["Kaaba Mecca", "Ancient desert pilgrims", "Islamic architecture", "Middle east desert"]
 
 ## Context:
 ### Video Subject
@@ -594,12 +603,21 @@ that visually represents what is being narrated at that moment.
 
 ## Rules
 1. Return ONLY a JSON array of objects with "sentence" and "term" keys.
-2. Each "term" must be 2-5 words, suitable for stock video search (Pexels/Pixabay).
+2. **CONTEXT AWARENESS**: Before extracting terms, deeply analyze the `video_subject` and surrounding script for context.
+   - If the subject is historical/ancient, your term must reflect that (e.g., "ancient", "historical", "vintage").
+   - If it's geographically specific (e.g., Mecca, Desert), ensure terms don't pull modern city stock.
+   - For example: if the script says "People walked towards the building" in a historical piece about Kaaba, the term should be "Ancient pilgrims walking" NOT just "people walking".
+3. **CRITICAL: STOCK SEARCH ALGORITHM**: Each "term" MUST be only 1-3 simple noun keywords (e.g., "desert sunset", "arabic coffee", "crowd walking"). 
+   - Stock video search engines (Pexels/Pixabay) DO NOT understand verbs, full sentences, or abstract concepts. 
+   - Extract only the core visual objects from the sentence, merged with the historical/geographical context.
 3. Terms must be in English.
 4. Match the visual mood and content of each sentence.
-5. Avoid generic terms like "video", "footage", "clip".{faceless_note}
+6. Avoid generic terms like "video", "footage", "clip".{faceless_note}
 
-## Script
+## Context Data
+- **Overall Subject:** {video_subject}
+
+## Script to Break Down
 {video_script}
 
 ## Output Format (JSON only, no markdown):
@@ -644,6 +662,56 @@ that visually represents what is being narrated at that moment.
         logger.warning("[C3] Scene terms generation failed, falling back to regular terms")
 
     return scene_terms
+
+def generate_hook_search_term(video_subject: str, video_script: str, use_faceless: bool = False) -> str:
+    """
+    Analyzes the script and subject to extract ONE highly contextual, optimized 1-3 word noun 
+    search term specifically intended for the very first (hook) video clip.
+    """
+    faceless_note = ""
+    if use_faceless:
+        faceless_note = "\n- AVOID terms with faces, portraits, or people looking at camera."
+        
+    prompt = f"""
+# Role: Hook Video Visualizer
+
+## Task
+You must generate exactly ONE highly specific background video search term for the first 5 seconds (the hook) of the video.
+
+## Context
+- **Base Subject**: {video_subject}
+- **Script (for context)**: {video_script[:500]}...
+
+## Rules
+1. Return ONLY the search term string. No quotes, no markdown, no JSON.
+2. The term MUST be 1-3 simple nouns (e.g., "Kaaba Mecca", "Ancient Roman Colosseum", "Desert sunset").
+3. DO NOT use conversational words ("History of", "Story of", "How to").
+4. **CONTEXT**: Infer the era and geography from the script (Ancient vs Modern? Desert vs Ocean?) and prepend the strongest visual adjective to the core subject.
+5. Avoid generic terms like "video", "footage", "background".{faceless_note}
+"""
+    _hash = hashlib.md5(video_script.encode()).hexdigest()[:8]
+    cached = llm_cache.get("hook_term", subject=video_subject, script_hash=_hash, faceless=use_faceless)
+    if cached:
+        return cached
+
+    for i in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if response and not "Error:" in response:
+                term = response.strip().strip('"').strip("'")
+                # Fallback to subject if LLM hallucinates a long sentence
+                if len(term.split()) > 5:
+                    continue 
+                llm_cache.set("hook_term", term, subject=video_subject, script_hash=_hash, faceless=use_faceless)
+                logger.success(f"Generated hook-specific search term: {term}")
+                return term
+        except Exception as e:
+            logger.warning(f"Hook term attempt {i+1} failed: {e}")
+            time.sleep(1)
+
+    # Absolute fallback: strip simple filler and use subject
+    fallback = re.sub(r"(?i)^(history of|story of|how to|what is|why did)\s*", "", video_subject).strip()
+    return fallback
 
 
 if __name__ == "__main__":

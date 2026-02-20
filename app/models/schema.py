@@ -143,6 +143,10 @@ class VideoParams(BaseModel):
     # Faceless Mode settings
     use_faceless: Optional[bool] = False
 
+    # Dynamic Hook configuration
+    hook_text: Optional[str] = ""
+    hook_duration: float = 3.0
+
     # T0-5: Target platform for safe zone awareness
     target_platform: Optional[str] = "default"  # youtube_shorts, tiktok, instagram_reels, default
 

@@ -150,7 +150,61 @@ def generate_audio(task_id, params, video_script):
             """.strip()
             )
             return None, None, None
+            
+        # Hook Audio Delay Handling
+        if getattr(params, "enable_hook", False):
+            # Generate Hook Text up-front to calculate dynamic duration
+            try:
+                from app.utils import hook_generator
+                params.hook_text = hook_generator.get_hook_text(
+                    category=params.video_subject,
+                    subject=params.video_subject,
+                    auto_optimize=getattr(params, "auto_optimize", True)
+                )
+                
+                # Normal reading speed is ~3 words per second. Min 2s, Max 5s.
+                word_count = len(params.hook_text.split())
+                params.hook_duration = max(2.5, min(5.0, word_count / 2.5))
+                logger.info(f"Dynamic hook duration calculated: {params.hook_duration:.2f}s for text: '{params.hook_text}'")
+                
+                from pydub import AudioSegment
+                
+                # Load the TTS audio
+                speech = AudioSegment.from_file(audio_file)
+                # Create exact silence matching the dynamic duration
+                silence_ms = int(params.hook_duration * 1000)
+                silence = AudioSegment.silent(duration=silence_ms)
+                # Combine them
+                combined_audio = silence + speech
+                # Overwrite original
+                combined_audio.export(audio_file, format="mp3")
+                logger.info(f"prepended {params.hook_duration:.2f} seconds of silence to audio file")
+                
+                # IMPORTANT: Since `sub_maker` stores timing metadata for Edge TTS subtitles,
+                # we must shift ALL timestamps by the dynamic duration (1 second = 10,000,000 ticks)
+                shift_ticks = int(params.hook_duration * 10_000_000)
+                try:
+                    if sub_maker and hasattr(sub_maker, 'offset') and len(sub_maker.offset) > 0:
+                        shifted_offsets = []
+                        for (start_ticks, end_ticks) in sub_maker.offset:
+                            shifted_offsets.append((start_ticks + shift_ticks, end_ticks + shift_ticks))
+                        sub_maker.offset = shifted_offsets
+                        logger.info(f"shifted sub_maker subtitle timings by {params.hook_duration:.2f} seconds")
+                except Exception as e:
+                    logger.warning(f"failed to shift sub_maker timings (whisper fallback will catch it): {e}")
+
+            except ImportError:
+                logger.error("pydub is required for hook audio delay. Falling back to unmodified audio.")
+            except Exception as e:
+                logger.error(f"failed to pad audio with silence for hook: {e}. Falling back to unmodified audio.")
+
+        
         audio_duration = math.ceil(voice.get_audio_duration(sub_maker))
+        if getattr(params, "enable_hook", False) and sub_maker is None:
+            # If sub_maker is None but hook is enabled (e.g., custom provider or error),
+            # get the actual physical duration which now includes the +3s.
+            audio_duration = math.ceil(voice.get_audio_duration(audio_file))
+            
         if audio_duration == 0:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             logger.error("failed to get audio duration.")
@@ -494,6 +548,19 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             return
 
+        # [C4] Generate specialized hook search term and force it to be the first search priority
+        try:
+            hook_term = llm.generate_hook_search_term(
+                video_subject=params.video_subject,
+                video_script=video_script,
+                use_faceless=getattr(params, 'use_faceless', False)
+            )
+            if hook_term and hook_term not in video_terms:
+                video_terms.insert(0, hook_term)
+                logger.info(f"[C4] Injected specialized hook background term: '{hook_term}' at index 0")
+        except Exception as e:
+            logger.warning(f"[C4] Specialized hook term generation failed (non-critical): {e}")
+
         # [C3] Scene-aware matching: generate per-sentence terms in parallel with audio
         # We generate them here so they're ready when material download starts.
         try:
@@ -537,7 +604,13 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         # [C3] Use scene-aware terms if available, otherwise fall back to regular terms
         if video_scene_terms:
             scene_search_terms = [item["term"] for item in video_scene_terms if "term" in item]
-            logger.info(f"[C3] Using {len(scene_search_terms)} scene-aware search terms")
+            
+            # [C4] Ensure the injected hook term remains the absolute top priority
+            hook_term = video_terms[0] if video_terms else None
+            if hook_term and (not scene_search_terms or scene_search_terms[0] != hook_term):
+                scene_search_terms.insert(0, hook_term)
+                
+            logger.info(f"[C3] Using {len(scene_search_terms)} scene-aware search terms (Hook anchored: {hook_term})")
             return get_video_materials(task_id, params, scene_search_terms, estimated_duration)
         return get_video_materials(task_id, params, video_terms, estimated_duration)
 
