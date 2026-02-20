@@ -558,13 +558,17 @@ with left_panel:
                     video_subject=params.video_subject, language=params.video_language
                 )
                 terms = llm.generate_terms(params.video_subject, script)
-                if "Error: " in script:
+                if not script:
+                    st.error(tr("Failed to generate video script: Script generation returned empty or error."))
+                elif isinstance(script, str) and "Error: " in script:
                     st.error(tr(script))
-                elif "Error: " in terms:
+                elif not terms:
+                    st.error(tr("Failed to generate video terms: Terms generation returned empty or error."))
+                elif isinstance(terms, str) and "Error: " in terms:
                     st.error(tr(terms))
                 else:
                     st.session_state["video_script"] = script
-                    st.session_state["video_terms"] = ", ".join(terms)
+                    st.session_state["video_terms"] = ", ".join(terms) if isinstance(terms, list) else str(terms)
         params.video_script = st.text_area(
             tr("Video Script"), value=st.session_state["video_script"], height=280
         )
@@ -575,10 +579,12 @@ with left_panel:
 
             with st.spinner(tr("Generating Video Keywords")):
                 terms = llm.generate_terms(params.video_subject, params.video_script)
-                if "Error: " in terms:
+                if not terms:
+                    st.error(tr("Failed to generate video terms: Terms generation returned empty or error."))
+                elif isinstance(terms, str) and "Error: " in terms:
                     st.error(tr(terms))
                 else:
-                    st.session_state["video_terms"] = ", ".join(terms)
+                    st.session_state["video_terms"] = ", ".join(terms) if isinstance(terms, list) else str(terms)
 
         video_terms = st.text_area(
             tr("Video Keywords"),
