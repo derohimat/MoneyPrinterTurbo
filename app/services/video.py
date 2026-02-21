@@ -574,75 +574,7 @@ def generate_video(
 
         logger.info(f"  ⑤ font: {font_path}")
 
-    def create_text_clip(subtitle_item):
-        params.font_size = int(params.font_size)
-        params.stroke_width = int(params.stroke_width)
-        phrase = subtitle_item[1]
-        max_width = video_width * 0.9
-        wrapped_txt, txt_height = wrap_text(
-            phrase, max_width=max_width, font=font_path, fontsize=params.font_size
-        )
-        interline = int(params.font_size * 0.25)
-        size=(int(max_width), int(txt_height + params.font_size * 0.25 + (interline * (wrapped_txt.count("\n") + 1))))
 
-        _clip = TextClip(
-            text=wrapped_txt,
-            font=font_path,
-            font_size=params.font_size,
-            color=params.text_fore_color,
-            bg_color=None, # T2-2: We handle background manually
-            stroke_color=params.stroke_color,
-            stroke_width=params.stroke_width,
-            # interline=interline,
-            # size=size,
-        )
-        
-        # T2-2: Subtitle background box
-        bg_color = params.text_background_color
-        if bg_color:
-            if isinstance(bg_color, bool):
-                 bg_color = "#000000" # Default black if just 'True'
-            
-            # Create rounded box
-            padding = 20
-            w, h = _clip.size
-            bg_size = (w + padding, h + padding)
-            bg_clip = video_effects.create_rounded_box_clip(bg_size, color=bg_color, radius=15, opacity=0.8)
-            
-            # Center text on background
-            _clip = CompositeVideoClip([bg_clip, _clip.with_position("center")])
-
-        duration = subtitle_item[0][1] - subtitle_item[0][0]
-        _clip = _clip.with_start(subtitle_item[0][0])
-        _clip = _clip.with_end(subtitle_item[0][1])
-        _clip = _clip.with_duration(duration)
-        # T0-5: Platform-aware safe zone positioning
-        from app.utils.safe_zones import get_safe_subtitle_y
-        if params.subtitle_mode == "word":
-             # Apply pop-in for word level animation
-             _clip = video_effects.pop_in_effect(_clip, duration=0.1)
-
-        target_platform = getattr(params, "target_platform", "default") or "default"
-        
-        if params.subtitle_position == "bottom":
-            safe_y = get_safe_subtitle_y(video_height, _clip.h, "bottom", target_platform)
-            _clip = _clip.with_position(("center", safe_y))
-        elif params.subtitle_position == "top":
-            safe_y = get_safe_subtitle_y(video_height, _clip.h, "top", target_platform)
-            _clip = _clip.with_position(("center", safe_y))
-        elif params.subtitle_position == "custom":
-            # Ensure the subtitle is fully within the screen bounds
-            margin = 10  # Additional margin, in pixels
-            max_y = video_height - _clip.h - margin
-            min_y = margin
-            custom_y = (video_height - _clip.h) * (params.custom_position / 100)
-            custom_y = max(
-                min_y, min(custom_y, max_y)
-            )  # Constrain the y value within the valid range
-            _clip = _clip.with_position(("center", custom_y))
-        else:  # center
-            _clip = _clip.with_position(("center", "center"))
-        return _clip
 
     video_clip = VideoFileClip(video_path) # Keep audio (SFX from combine_videos)
     audio_clip = AudioFileClip(audio_path).with_effects(
@@ -653,43 +585,9 @@ def generate_video(
     if video_clip.duration > audio_clip.duration:
         video_clip = video_clip.subclipped(0, audio_clip.duration)
 
-    def make_textclip(text):
-        return TextClip(
-            text=text,
-            font=font_path,
-            font_size=params.font_size,
-        )
-
+    # Removed MoviePy TextClip generation; Subtitles will be burned directly via FFmpeg ASS
     text_clips = []
     overlay_clips = [] # Initialize here so it's globally available for the function
-    
-    if subtitle_path and os.path.exists(subtitle_path):
-        subtitle_items = []
-        json_path = subtitle_path.replace(".srt", ".json")
-        
-        # T2-1: check for word-level mode and available data
-        if params.subtitle_mode == "word" and os.path.exists(json_path):
-             try:
-                 with open(json_path, "r", encoding="utf-8") as f:
-                     word_data = json.load(f)
-                 # Convert to format expected by create_text_clip: ((start, end), text)
-                 for w in word_data:
-                     subtitle_items.append(((w['start'], w['end']), w['word']))
-                 logger.info(f"using word-level subtitles: {len(subtitle_items)} words")
-             except Exception as e:
-                 logger.error(f"failed to load subtitle json: {e}, falling back to srt")
-                 
-        if not subtitle_items:
-            # Fallback to SRT (Phrase level)
-            sub = SubtitlesClip(
-                subtitles=subtitle_path, encoding="utf-8", make_textclip=make_textclip
-            )
-            subtitle_items = sub.subtitles
-
-        text_clips = []
-        for item in subtitle_items:
-            clip = create_text_clip(subtitle_item=item)
-            text_clips.append(clip)
             
     # T4-4: Number Counter Animation
     if params.enable_number_counter and subtitle_path and os.path.exists(subtitle_path):
@@ -901,9 +799,10 @@ def generate_video(
     if len(overlay_clips) > 1:
         video_clip = CompositeVideoClip(overlay_clips)
 
-    # T0-2: bitrate control for final output
+    # T0-2: bitrate control for base video (no subtitles yet)
+    temp_output_file = output_file.replace(".mp4", "_nosub.mp4")
     video_clip.write_videofile(
-        output_file,
+        temp_output_file,
         audio_codec=audio_codec,
         temp_audiofile_path=output_dir,
         threads=params.n_threads or 2,
@@ -913,6 +812,51 @@ def generate_video(
     )
     video_clip.close()
     del video_clip
+
+    # Step 2: Burn in ASS Subtitles using native FFmpeg (blazingly fast, solves WinError 32)
+    ass_subtitle_path = subtitle_path.replace(".srt", ".ass") if subtitle_path else None
+    
+    if ass_subtitle_path and os.path.exists(ass_subtitle_path):
+        logger.info(f"Burning native FFmpeg ASS subtitles: {ass_subtitle_path}")
+        
+        # FFmpeg on Windows requires escaping backslashes and colon in the path for the -vf filter
+        if os.name == 'nt':
+            # e.g., C:\path\to\file.ass -> C\\:/path/to/file.ass
+            safe_ass_path = ass_subtitle_path.replace('\\', '/').replace(':', '\\\\:')
+            vf_string = f"ass='{safe_ass_path}'" 
+        else:
+            vf_string = f"ass='{ass_subtitle_path}'"
+
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_cmd = [
+            ffmpeg_exe,
+            "-y", # Overwrite
+            "-i", temp_output_file, # Input Base Video
+            "-vf", vf_string, # Subtitle Filter
+            "-c:v", "libx264", # Video Codec
+            "-b:v", "8000k", # Keep Bitrate
+            "-c:a", "copy", # Just copy the mixed audio
+            output_file # Final Output
+        ]
+        
+        try:
+            import subprocess
+            subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            os.remove(temp_output_file) # Clean up temp file
+            logger.info(f"Successfully burned native subtitles to: {output_file}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg ASS burn failed. Target command: {' '.join(ffmpeg_cmd)}")
+            logger.error(f"FFmpeg Error Output: {e.stderr.decode('utf-8')}")
+            # Fallback: Just rename the video without subtitles so it doesn't fail completely
+            if os.path.exists(output_file):
+                os.remove(output_file)
+            os.rename(temp_output_file, output_file)
+    else:
+        # No subtitles generated or needed, just rename temp to final
+        if os.path.exists(output_file):
+             os.remove(output_file)
+        os.rename(temp_output_file, output_file)
+        logger.info(f"No valid ASS subtitle found, video saved without text overlay.")
 
 
 def preprocess_video(materials: List[MaterialInfo], clip_duration=4):

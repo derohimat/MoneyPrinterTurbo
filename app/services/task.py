@@ -236,9 +236,10 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file, audi
     subject = params.video_subject
     safe_name = re.sub(r'[\\/*?:"<>|]', "", f"{category}_{subject}").replace(" ", "_")
     subtitle_path = path.join(utils.task_dir(task_id), f"{safe_name}.srt")
+    ass_subtitle_path = path.join(utils.task_dir(task_id), f"{safe_name}.ass")
     
-    if os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0:
-        logger.success(f"subtitle already exists: {subtitle_path}")
+    if os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0 and os.path.exists(ass_subtitle_path):
+        logger.success(f"subtitles already exist: {subtitle_path} & {ass_subtitle_path}")
         return subtitle_path
         
     if sub_maker is None:
@@ -252,6 +253,13 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file, audi
         voice.create_subtitle(
             text=video_script, sub_maker=sub_maker, subtitle_file=subtitle_path
         )
+        try:
+            voice.create_ass_subtitle(
+                sub_maker=sub_maker, text=video_script, subtitle_file=ass_subtitle_path, params=params.dict()
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate ASS subtitle: {e}")
+            
         if not os.path.exists(subtitle_path):
             subtitle_fallback = True
             logger.warning("subtitle file not found, fallback to whisper")

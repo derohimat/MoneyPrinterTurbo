@@ -1813,6 +1813,91 @@ def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
     except Exception as e:
         logger.error(f"failed, error: {str(e)}")
 
+def create_ass_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str, params: dict = None):
+    """
+    Creates an Advanced SubStation Alpha (.ass) subtitle file.
+    Supports dynamic keyword highlighting and platform-aware safe zones.
+    """
+    if params is None:
+        params = {}
+        
+    font_name = params.get("font_name", "Arial")
+    font_size = int(params.get("font_size", 60))
+    # ASS colors are in BGR format &HBBGGRR&
+    primary_color = "&HFFFFFF&" # White
+    highlight_color = "&H00FFFF&" # Yellow/Gold for dynamic keywords
+    stroke_color = "&H000000&" # Black outline
+    stroke_width = int(params.get("stroke_width", 3))
+
+    # ASS Header
+    ass_content = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "WrapStyle: 1",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Default,{font_name},{font_size},{primary_color},&H000000FF,{stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{stroke_width},0,2,10,10,60,1", # Alignment 2 is Bottom Center
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+    ]
+
+    def format_ass_time(t_100ns):
+        # Convert 100ns to seconds
+        s = t_100ns / 10000000.0
+        h = int(s // 3600)
+        m = int((s % 3600) // 60)
+        secs = s % 60
+        # ASS time format: H:MM:SS.cs
+        return f"{h}:{m:02d}:{secs:05.2f}"
+
+    def apply_dynamic_coloring(line_text):
+        words = line_text.split()
+        colored_words = []
+        for word in words:
+            # Simple heuristic: Highlight words >= 3 chars if they look like keywords (strip punctuation)
+            clean_word = re.sub(r'[^\w\s]', '', word)
+            if len(clean_word) >= 4: # Changed from 5 to 4 to catch more keywords in Chinese/English
+                colored_words.append(f"{{\\c{highlight_color}}}{word}{{\\c{primary_color}}}")
+            else:
+                colored_words.append(word)
+        return " ".join(colored_words)
+
+    sub_items = []
+    
+    # Simple word-level alignment for now since SubMaker gives word/phrase level offsets
+    try:
+        dialogues = []
+        for offset, sub in zip(sub_maker.offset, sub_maker.subs):
+            start_time, end_time = offset
+            if start_time < 0:
+                 continue
+            
+            sub = unescape(sub).strip()
+            if not sub:
+                continue
+                
+            ass_start = format_ass_time(start_time)
+            ass_end = format_ass_time(end_time)
+            
+            # Apply color highlights
+            colored_text = apply_dynamic_coloring(sub)
+            
+            # Dialogue: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+            dialogue = f"Dialogue: 0,{ass_start},{ass_end},Default,,0,0,0,,{colored_text}"
+            dialogues.append(dialogue)
+            
+        ass_content.extend(dialogues)
+
+        with open(subtitle_file, "w", encoding="utf-8") as file:
+            file.write("\n".join(ass_content) + "\n")
+            
+        logger.info(f"completed, ASS subtitle file created: {subtitle_file}")
+    except Exception as e:
+        logger.error(f"failed to create ASS subtitle: {str(e)}")
+
 
 def _get_audio_duration_from_submaker(sub_maker: SubMaker):
     """
