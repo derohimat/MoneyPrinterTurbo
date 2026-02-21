@@ -502,12 +502,13 @@ Analyze the video subject and script for historical, geographical, and emotional
 
 ## Constraints:
 1. The search terms must be returned as a JSON-array of strings.
-2. **CONTEXT AWARENESS**: Before generating terms, analyze the script to understand:
+2. **HOOK PRIORITY**: The VERY FIRST term in your array (Index 0) MUST be the "Hook Term". This term must represent the most powerful, highly contextual visual for the opening 5 seconds (e.g., "Ancient Mecca Pilgrims", "Golden Desert Sunset").
+3. **CONTEXT AWARENESS**: Before generating the rest of the terms, analyze the script to understand:
    - **Time Period**: Is it ancient, modern, futuristic? (e.g., Use "ancient", "historical", "vintage" if applicable).
    - **Geography/Location**: Where does this take place? (e.g., "desert", "middle east", "jungle", "ocean").
    - **Mood/Action**: What is the core vibe? (e.g., "peaceful", "crowd", "praying", "chaotic").
    - Integrate these contextual adjectives with the core nouns.
-3. **CRITICAL: STOCK SEARCH ALGORITHM**: Stock video search engines (like Pexels/Pixabay) DO NOT understand complex sentences or punctuation.
+4. **CRITICAL: STOCK SEARCH ALGORITHM**: Stock video search engines (like Pexels/Pixabay) DO NOT understand complex sentences.
    - You MUST extract only the **core 1-3 noun keywords** from the subject.
    - DROP all conversational/filler words (e.g., drop "History of", "How to", "Why did", "Story of").
    - If the subject has comma/punctuation like "Kabah, Makah", simplify it to "Kabah Makah" or even just "Kaaba Mecca" (use the most common English spelling for better stock results).
@@ -662,56 +663,6 @@ that visually represents what is being narrated at that moment.
         logger.warning("[C3] Scene terms generation failed, falling back to regular terms")
 
     return scene_terms
-
-def generate_hook_search_term(video_subject: str, video_script: str, use_faceless: bool = False) -> str:
-    """
-    Analyzes the script and subject to extract ONE highly contextual, optimized 1-3 word noun 
-    search term specifically intended for the very first (hook) video clip.
-    """
-    faceless_note = ""
-    if use_faceless:
-        faceless_note = "\n- AVOID terms with faces, portraits, or people looking at camera."
-        
-    prompt = f"""
-# Role: Hook Video Visualizer
-
-## Task
-You must generate exactly ONE highly specific background video search term for the first 5 seconds (the hook) of the video.
-
-## Context
-- **Base Subject**: {video_subject}
-- **Script (for context)**: {video_script[:500]}...
-
-## Rules
-1. Return ONLY the search term string. No quotes, no markdown, no JSON.
-2. The term MUST be 1-3 simple nouns (e.g., "Kaaba Mecca", "Ancient Roman Colosseum", "Desert sunset").
-3. DO NOT use conversational words ("History of", "Story of", "How to").
-4. **CONTEXT**: Infer the era and geography from the script (Ancient vs Modern? Desert vs Ocean?) and prepend the strongest visual adjective to the core subject.
-5. Avoid generic terms like "video", "footage", "background".{faceless_note}
-"""
-    _hash = hashlib.md5(video_script.encode()).hexdigest()[:8]
-    cached = llm_cache.get("hook_term", subject=video_subject, script_hash=_hash, faceless=use_faceless)
-    if cached:
-        return cached
-
-    for i in range(_max_retries):
-        try:
-            response = _generate_response(prompt)
-            if response and not "Error:" in response:
-                term = response.strip().strip('"').strip("'")
-                # Fallback to subject if LLM hallucinates a long sentence
-                if len(term.split()) > 5:
-                    continue 
-                llm_cache.set("hook_term", term, subject=video_subject, script_hash=_hash, faceless=use_faceless)
-                logger.success(f"Generated hook-specific search term: {term}")
-                return term
-        except Exception as e:
-            logger.warning(f"Hook term attempt {i+1} failed: {e}")
-            time.sleep(1)
-
-    # Absolute fallback: strip simple filler and use subject
-    fallback = re.sub(r"(?i)^(history of|story of|how to|what is|why did)\s*", "", video_subject).strip()
-    return fallback
 
 
 if __name__ == "__main__":

@@ -548,18 +548,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             return
 
-        # [C4] Generate specialized hook search term and force it to be the first search priority
-        try:
-            hook_term = llm.generate_hook_search_term(
-                video_subject=params.video_subject,
-                video_script=video_script,
-                use_faceless=getattr(params, 'use_faceless', False)
-            )
-            if hook_term and hook_term not in video_terms:
-                video_terms.insert(0, hook_term)
-                logger.info(f"[C4] Injected specialized hook background term: '{hook_term}' at index 0")
-        except Exception as e:
-            logger.warning(f"[C4] Specialized hook term generation failed (non-critical): {e}")
+
 
         # [C3] Scene-aware matching: generate per-sentence terms in parallel with audio
         # We generate them here so they're ready when material download starts.
