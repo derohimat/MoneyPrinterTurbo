@@ -646,6 +646,6 @@ def download_videos(
 
     # Apply quality scoring filter
     if video_paths:
-        video_paths = video_scorer.filter_videos_by_quality(video_paths, min_score=40)
+        video_paths = video_scorer.filter_videos_by_quality(video_paths, min_score=60)
 
     return video_paths

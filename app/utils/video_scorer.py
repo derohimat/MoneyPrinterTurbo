@@ -114,15 +114,15 @@ def score_video(
         score += 10
         details["stability_score"] = 10
 
-        # [I3] Tag match score (0-10 points)
-        # Use filename/path as a proxy for video tags (since we don't have tags post-download).
-        # The real tag matching happens in material.py validate_video_metadata before download.
-        # Here we give a small bonus if the search term keywords appear in the file path.
+        # [I3] Tag match score (0-30 points)
+        # Give a massive bonus to videos where the exact search term keywords appear in the path/name.
+        # This ensures a highly relevant 720p video easily beats a generic irrelevant 1080p video.
         if search_term:
             tokens = [t.strip().lower() for t in search_term.split() if len(t) > 2]
             path_lower = video_path.lower()
             matched = sum(1 for t in tokens if t in path_lower)
-            tag_score = min(10, matched * 3)
+            # +10 points per matched keyword, up to 30 points
+            tag_score = min(30, matched * 10)
             score += tag_score
             details["tag_match_score"] = tag_score
         else:
@@ -142,7 +142,7 @@ def score_video(
 
 def filter_videos_by_quality(
     video_paths: list,
-    min_score: int = 40,
+    min_score: int = 60,
     search_term: str = "",
 ) -> list:
     """
