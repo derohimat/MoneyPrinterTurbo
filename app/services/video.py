@@ -564,22 +564,51 @@ def generate_video(
     # write into the same directory as the output file
     output_dir = os.path.dirname(output_file)
 
-    font_path = ""
+    # Determine font path with fallback
+    if not params.font_name:
+        params.font_name = "STHeitiMedium.ttc"
+    
+    font_path = os.path.join(utils.font_dir(), params.font_name)
+    if os.name == "nt":
+        font_path = font_path.replace("\\", "/")
+
+    # Verify font exists and apply fallback if needed
+    if not os.path.exists(font_path):
+        logger.error(f"  ❌ FONT NOT FOUND: {font_path}")
+        # Fallback to a common Linux font if we're in Docker
+        if os.name != "nt":
+            fallback_fonts = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                "/MoneyPrinterTurbo/resource/fonts/STHeitiMedium.ttc" # Internal fallback
+            ]
+            for f in fallback_fonts:
+                if os.path.exists(f):
+                    logger.warning(f"  ⚠️ falling back to system font: {f}")
+                    font_path = f
+                    break
+    else:
+        logger.info(f"  ✅ using font: {font_path}")
+
+    # Log font and subtitle status
     if params.subtitle_enabled:
-        if not params.font_name:
-            params.font_name = "STHeitiMedium.ttc"
-        font_path = os.path.join(utils.font_dir(), params.font_name)
-        if os.name == "nt":
-            font_path = font_path.replace("\\", "/")
+        logger.info(f"  ⑤ subtitle font: {font_path}")
+    else:
+        logger.info(f"  ⑤ subtitles disabled, using font for overlays: {font_path}")
 
-        logger.info(f"  ⑤ font: {font_path}")
+    try:
+        video_clip = VideoFileClip(video_path) # Keep audio (SFX from combine_videos)
+    except Exception as e:
+        logger.error(f"failed to load video clip {video_path}: {e}")
+        raise
 
-
-
-    video_clip = VideoFileClip(video_path) # Keep audio (SFX from combine_videos)
-    audio_clip = AudioFileClip(audio_path).with_effects(
-        [afx.AudioNormalize(), afx.MultiplyVolume(params.voice_volume)]
-    )
+    try:
+        audio_clip = AudioFileClip(audio_path).with_effects(
+            [afx.AudioNormalize(), afx.MultiplyVolume(params.voice_volume)]
+        )
+    except Exception as e:
+        logger.error(f"failed to load audio clip {audio_path}: {e}")
+        raise
     
     # Strictly trim video duration to match the voice length (prevent overflow)
     if video_clip.duration > audio_clip.duration:

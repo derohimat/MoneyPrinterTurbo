@@ -13,39 +13,42 @@ ENV PYTHONPATH="/MoneyPrinterTurbo"
 RUN echo "deb http://mirrors.aliyun.com/debian bullseye main" > /etc/apt/sources.list && \
     echo "deb http://mirrors.aliyun.com/debian-security bullseye-security main" >> /etc/apt/sources.list && \
     ( \
-        for i in 1 2 3; do \
-            echo "Attempt $i: Using Aliyun mirror"; \
-            apt-get update && apt-get install -y --no-install-recommends \
-                git \
-                imagemagick \
-                ffmpeg && break || \
-            echo "Attempt $i failed, retrying..."; \
-            if [ $i -eq 3 ]; then \
-                echo "Aliyun mirror failed, switching to Tsinghua mirror"; \
-                sed -i 's/mirrors.aliyun.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list && \
-                sed -i 's/mirrors.aliyun.com\/debian-security/mirrors.tuna.tsinghua.edu.cn\/debian-security/g' /etc/apt/sources.list && \
-                ( \
-                    apt-get update && apt-get install -y --no-install-recommends \
-                        git \
-                        imagemagick \
-                        ffmpeg || \
-                    ( \
-                        echo "Tsinghua mirror failed, switching to default Debian mirror"; \
-                        sed -i 's/mirrors.tuna.tsinghua.edu.cn/deb.debian.org/g' /etc/apt/sources.list && \
-                        sed -i 's/mirrors.tuna.tsinghua.edu.cn\/debian-security/security.debian.org/g' /etc/apt/sources.list; \
-                        apt-get update && apt-get install -y --no-install-recommends \
-                            git \
-                            imagemagick \
-                            ffmpeg; \
-                    ); \
-                ); \
-            fi; \
-            sleep 5; \
-        done \
+    for i in 1 2 3; do \
+    echo "Attempt $i: Using Aliyun mirror"; \
+    apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    imagemagick \
+    ffmpeg && break || \
+    echo "Attempt $i failed, retrying..."; \
+    if [ $i -eq 3 ]; then \
+    echo "Aliyun mirror failed, switching to Tsinghua mirror"; \
+    sed -i 's/mirrors.aliyun.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list && \
+    sed -i 's/mirrors.aliyun.com\/debian-security/mirrors.tuna.tsinghua.edu.cn\/debian-security/g' /etc/apt/sources.list && \
+    ( \
+    apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    imagemagick \
+    ffmpeg || \
+    ( \
+    echo "Tsinghua mirror failed, switching to default Debian mirror"; \
+    sed -i 's/mirrors.tuna.tsinghua.edu.cn/deb.debian.org/g' /etc/apt/sources.list && \
+    sed -i 's/mirrors.tuna.tsinghua.edu.cn\/debian-security/security.debian.org/g' /etc/apt/sources.list; \
+    apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    imagemagick \
+    ffmpeg; \
+    ); \
+    ); \
+    fi; \
+    sleep 5; \
+    done \
     ) && rm -rf /var/lib/apt/lists/*
 
-# Fix security policy for ImageMagick
-RUN sed -i '/<policy domain="path" rights="none" pattern="@\*"/d' /etc/ImageMagick-6/policy.xml
+# Fix security policy for ImageMagick (required for MoviePy TextClip)
+RUN sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@\*"/g' /etc/ImageMagick-6/policy.xml && \
+    sed -i '/<policy domain="path" rights="none" pattern="@\*"/d' /etc/ImageMagick-6/policy.xml && \
+    sed -i 's/rights="none" pattern="PDF"/rights="read|write" pattern="PDF"/g' /etc/ImageMagick-6/policy.xml && \
+    sed -i 's/rights="none" pattern="LABEL"/rights="read|write" pattern="LABEL"/g' /etc/ImageMagick-6/policy.xml
 
 # Copy only the requirements.txt first to leverage Docker cache
 COPY requirements.txt ./

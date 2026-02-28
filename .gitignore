@@ -46,3 +46,6 @@ batch_run_category.py
 output_tier*/
 *.temp.mp3
 *.temp.wav
+test.mp3
+test_v7.mp3
+verify.mp3
