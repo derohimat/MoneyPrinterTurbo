@@ -166,10 +166,12 @@ If you are using a Windows system, please refer to Microsoft's documentation:
 
 ```shell
 cd MoneyPrinterTurbo
-docker-compose up
+docker compose up -d
 ```
 
-> Note：The latest version of docker will automatically install docker compose in the form of a plug-in, and the start command is adjusted to `docker compose up `
+> Note：
+> 1. The latest version of docker will automatically install docker compose in the form of a plug-in, and the start command is recommended to be `docker compose up`.
+> 2. ImageMagick security policy fixes are now built-in. If you encounter `TextClip` errors in Docker, ensure you rebuild with the latest Dockerfile: `docker compose build`.
 
 #### ② Access the Web Interface
 

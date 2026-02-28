@@ -167,10 +167,12 @@ git clone https://github.com/harry0703/MoneyPrinterTurbo.git
 
 ```shell
 cd MoneyPrinterTurbo
-docker-compose up
+docker compose up -d
 ```
 
-> 注意：最新版的docker安装时会自动以插件的形式安装docker compose，启动命令调整为docker compose up
+> 注意：
+> 1. 最新版的docker安装时会自动以插件的形式安装docker compose，启动命令建议使用 `docker compose up`。
+> 2. 项目已经内置了 ImageMagick 安全策略修复，如果在 Docker 中遇到 `TextClip` 相关错误，请确保使用最新的 Dockerfile 重新构建镜像：`docker compose build`。
 
 #### ② 访问Web界面
 

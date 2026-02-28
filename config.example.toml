@@ -118,6 +118,9 @@ subtitle_provider = "edge"
 # Once you have installed it, ImageMagick will be automatically detected, except on Windows!
 # On Windows, for example "C:\Program Files (x86)\ImageMagick-7.1.1-Q16-HDRI\magick.exe"
 # Download from https://imagemagick.org/archive/binaries/ImageMagick-7.1.1-29-Q16-x64-static.exe
+#
+# NOTE for Docker users: ImageMagick is already pre-configured in the Docker image.
+# You do NOT need to set imagemagick_path if you are running in Docker.
 
 # imagemagick_path = "C:\\Program Files (x86)\\ImageMagick-7.1.1-Q16\\magick.exe"
 
