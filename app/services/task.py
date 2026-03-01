@@ -268,6 +268,10 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file, audi
         subtitle.create(audio_file=audio_file, subtitle_file=subtitle_path)
         logger.info("\n\n## correcting subtitle")
         subtitle.correct(subtitle_file=subtitle_path, video_script=video_script, audio_duration=audio_duration)
+        
+        # [FIX] Generate ASS subtitle from the corrected SRT for FFmpeg burning
+        if os.path.exists(subtitle_path):
+            subtitle.srt_to_ass(srt_file=subtitle_path, ass_file=ass_subtitle_path, params=params.dict())
 
     subtitle_lines = subtitle.file_to_subtitles(subtitle_path)
     if not subtitle_lines:

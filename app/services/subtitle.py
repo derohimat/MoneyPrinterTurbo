@@ -1,6 +1,7 @@
 import json
 import os.path
 import re
+from html import unescape
 from timeit import default_timer as timer
 
 try:
@@ -366,6 +367,101 @@ def correct(subtitle_file, video_script, audio_duration: float = 0.0):
         logger.info("Subtitle corrected")
     else:
         logger.success("Subtitle is correct")
+
+
+def srt_to_ass(srt_file: str, ass_file: str, params: dict = None):
+    """
+    Converts an SRT subtitle file to an Advanced SubStation Alpha (.ass) file.
+    Uses styling compatible with voice.py.
+    """
+    if not os.path.exists(srt_file):
+        logger.error(f"SRT file not found: {srt_file}")
+        return False
+
+    if params is None:
+        params = {}
+
+    font_name = params.get("font_name", "Arial")
+    font_size = int(params.get("font_size", 60))
+    # ASS colors are in BGR format &HBBGGRR&
+    primary_color = "&HFFFFFF&"  # White
+    highlight_color = "&H00FFFF&"  # Yellow/Gold for dynamic keywords
+    stroke_color = "&H000000&"  # Black outline
+    stroke_width = int(params.get("stroke_width", 3))
+
+    # ASS Header
+    ass_content = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "WrapStyle: 1",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Default,{font_name},{font_size},{primary_color},&H000000FF,{stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{stroke_width},0,2,10,10,60,1",  # Alignment 2 is Bottom Center
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+    ]
+
+    def format_ass_time(srt_time):
+        # Convert SRT time (00:00:01,500) to ASS time (0:00:01.50)
+        # srt_time is 'H:M:S,ms'
+        h, m, remaining = srt_time.split(":")
+        s, ms = remaining.split(",")
+        # Ensure H is single digit if < 10 for ASS (though 00: is usually fine, H: is standard)
+        h = str(int(h))
+        # ASS needs centiseconds (2 digits)
+        cs = ms[:2]
+        return f"{h}:{m}:{s}.{cs}"
+
+    def apply_dynamic_coloring(line_text):
+        words = line_text.split()
+        colored_words = []
+        for word in words:
+            # Simple heuristic: Highlight words >= 4 chars
+            clean_word = re.sub(r'[^\w\s]', '', word)
+            if len(clean_word) >= 4:
+                colored_words.append(f"{{\\c{highlight_color}}}{word}{{\\c{primary_color}}}")
+            else:
+                colored_words.append(word)
+        return " ".join(colored_words)
+
+    try:
+        items = file_to_subtitles(srt_file)
+        dialogues = []
+        for index, time_range, text in items:
+            times = time_range.split(" --> ")
+            if len(times) != 2:
+                continue
+            
+            start_time = format_ass_time(times[0].strip())
+            end_time = format_ass_time(times[1].strip())
+            
+            text = unescape(text).strip()
+            if not text:
+                continue
+                
+            # Replace newlines with ASS newline
+            text = text.replace("\n", "\\N")
+            
+            # Apply color highlights
+            colored_text = apply_dynamic_coloring(text)
+            
+            # Dialogue: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+            dialogue = f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{colored_text}"
+            dialogues.append(dialogue)
+            
+        ass_content.extend(dialogues)
+
+        with open(ass_file, "w", encoding="utf-8") as file:
+            file.write("\n".join(ass_content) + "\n")
+            
+        logger.info(f"completed, ASS subtitle file created from SRT: {ass_file}")
+        return True
+    except Exception as e:
+        logger.error(f"failed to convert SRT to ASS: {str(e)}")
+        return False
 
 
 if __name__ == "__main__":

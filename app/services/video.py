@@ -778,15 +778,19 @@ def generate_video(
             hook_font = font_path if font_path else "Arial"
             
             # Spectacular "Burn" Styling: Larger, bright yellow/orange gradient feel
+            # [FIX] Use a more conservative width and bound the font size to prevent clipping
+            hook_width = int(video_width * 0.8)
             hook_clip = TextClip(
                 text=hook_text,
                 font=hook_font,
-                font_size=max(50, int(params.font_size * 0.9)), # Significantly larger for impact
+                font_size=min(120, max(60, int(params.font_size * 1.5))), # Cap font size to 120
                 color="#FFFF00", # Yellow
                 stroke_color="#FF4500", # OrangeRed stroke
                 stroke_width=3,
                 method="caption",
-                size=(int(video_width * 0.9), None)
+                size=(hook_width, None),
+                horizontal_align="center", # Alignment for moviepy 2.x
+                vertical_align="center"
             )
             hook_clip = hook_clip.with_start(0).with_duration(hook_duration)
             hook_clip = hook_clip.with_position(("center", "center"))
