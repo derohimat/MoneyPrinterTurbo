@@ -134,7 +134,7 @@ def update_performance(task_id, platform, metrics):
             updates = []
             values = []
             for k, v in metrics.items():
-                if k in ["views", "likes", "comments", "shares", "retention_rate", "ctr", "avg_watch_time_sec"]:
+                if k in {"views", "likes", "comments", "shares", "retention_rate", "ctr", "avg_watch_time_sec"}:
                     updates.append(f"{k}=?")
                     values.append(v)
             
@@ -153,7 +153,7 @@ def update_performance(task_id, platform, metrics):
             placeholders = ["?", "?", "?"]
             
             for k, v in metrics.items():
-                if k in ["views", "likes", "comments", "shares", "retention_rate", "ctr", "avg_watch_time_sec"]:
+                if k in {"views", "likes", "comments", "shares", "retention_rate", "ctr", "avg_watch_time_sec"}:
                     cols.append(k)
                     vals.append(v)
                     placeholders.append("?")
