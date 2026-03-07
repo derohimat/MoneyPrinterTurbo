@@ -243,23 +243,41 @@ def parse_extension(filename):
     return Path(filename).suffix.lower().lstrip('.')
 
 
+def is_docker() -> bool:
+    """Check if the current process is running inside a Docker container."""
+    return os.path.exists('/.dockerenv')
+
+
 def open_folder(path: str):
     """
     Open a folder in the system's file explorer.
+    Returns: True if successful, "docker" if in docker, False if failed.
     """
     try:
+        if not path:
+            return False
+
+        path = os.path.normpath(os.path.abspath(path))
+
         if not os.path.exists(path):
             logger.warning(f"folder not found: {path}")
-            return
+            return False
+
+        if is_docker():
+            logger.warning(f"open_folder is not supported in Docker: {path}")
+            return "docker"
 
         if os.name == 'nt':  # Windows
             os.startfile(path)
+            return True
         elif os.name == 'posix':  # macOS or Linux
+            import subprocess
             if sys.platform == 'darwin':  # macOS
-                import subprocess
                 subprocess.call(['open', path])
+                return True
             else:  # Linux
-                import subprocess
                 subprocess.call(['xdg-open', path])
+                return True
     except Exception as e:
         logger.error(f"failed to open folder: {e}")
+        return False

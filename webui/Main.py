@@ -150,16 +150,12 @@ def get_all_songs():
 
 
 def open_task_folder(task_id):
-    try:
-        sys = platform.system()
-        path = os.path.join(root_dir, "storage", "tasks", task_id)
-        if os.path.exists(path):
-            if sys == "Windows":
-                os.system(f"start {path}")
-            if sys == "Darwin":
-                os.system(f"open {path}")
-    except Exception as e:
-        logger.error(e)
+    path = os.path.join(root_dir, "storage", "tasks", task_id)
+    res = utils.open_folder(path)
+    if res == "docker":
+        st.toast("🐳 Folder opening is not supported inside Docker containers.", icon="⚠️")
+    elif not res:
+        st.toast("❌ Failed to open folder.", icon="🚫")
 
 
 def scroll_to_bottom():

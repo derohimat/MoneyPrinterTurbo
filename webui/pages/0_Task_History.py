@@ -115,7 +115,11 @@ if all_db_jobs:
             with c4:
                 if job.get("output_path") and os.path.exists(job["output_path"]):
                     if st.button("📂 Open", key=f"open_db_{job_id}"):
-                        utils.open_folder(os.path.dirname(job["output_path"]))
+                        res = utils.open_folder(os.path.dirname(job["output_path"]))
+                        if res == "docker":
+                            st.toast("🐳 Folder opening is not supported inside Docker containers.", icon="⚠️")
+                        elif not res:
+                            st.toast("❌ Failed to open folder.", icon="🚫")
                 if job.get("error_message"):
                     st.caption(f"⚠️ {job['error_message'][:60]}")
 
@@ -154,7 +158,11 @@ if tasks:
         with col3:
             if st.button("📂 Open Folder", key=f"btn_open_{task_id}"):
                 task_dir = utils.task_dir(task_id)
-                utils.open_folder(task_dir)
+                res = utils.open_folder(task_dir)
+                if res == "docker":
+                    st.toast("🐳 Folder opening is not supported inside Docker containers.", icon="⚠️")
+                elif not res:
+                    st.toast("❌ Failed to open folder.", icon="🚫")
 
             if state == 1 and "videos" in task:
                 video_url = task["videos"][0]
