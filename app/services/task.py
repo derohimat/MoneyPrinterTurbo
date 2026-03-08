@@ -616,37 +616,32 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         return get_video_materials(task_id, params, video_terms, estimated_duration)
 
     if stop_at in ("audio", "subtitle", "materials", "video"):
-        logger.info("## [PARALLEL] Starting audio generation + material download concurrently...")
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_audio = executor.submit(_run_audio)
-            future_materials = executor.submit(_run_materials) if params.video_source != "local" else None
+        logger.info("## [SEQUENTIAL] Generating audio first to ensure exact duration for materials...")
+        
+        # 1. ALWAYS run audio first to get the EXACT duration
+        audio_file, audio_duration, sub_maker = _run_audio()
+        if not audio_file:
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            return
+            
+        logger.info(f"Audio generation completed. Exact duration: {audio_duration}s. Now downloading materials.")
 
-            # Collect audio result
-            audio_file, audio_duration, sub_maker = future_audio.result()
-            if not audio_file:
-                sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
-                return
+        # 2. Only THEN download materials with the exact duration
+        if params.video_source != "local":
+            scene_search_terms = [item["term"] for item in video_scene_terms if "term" in item] if video_scene_terms else video_terms
+            hook_term = video_terms[0] if video_terms else None
+            if hook_term and scene_search_terms and scene_search_terms[0] != hook_term:
+                scene_search_terms.insert(0, hook_term)
+            downloaded_videos = get_video_materials(task_id, params, scene_search_terms, audio_duration)
+        else:
+            downloaded_videos = get_video_materials(task_id, params, video_terms, audio_duration)
 
-            # Collect materials result
-            if future_materials is not None:
-                # Discard early estimated download videos and REDOWNLOAD with EXACT audio_duration.
-                # Early estimation often severely underestimates true TTS duration.
-                _ = future_materials.result() # Wait for it to finish to prevent orphaned threads
-                logger.info(f"Re-checking downloaded materials with exact duration: {audio_duration}s")
-                scene_search_terms = [item["term"] for item in video_scene_terms if "term" in item] if video_scene_terms else video_terms
-                hook_term = video_terms[0] if video_terms else None
-                if hook_term and scene_search_terms and scene_search_terms[0] != hook_term:
-                    scene_search_terms.insert(0, hook_term)
-                downloaded_videos = get_video_materials(task_id, params, scene_search_terms, audio_duration)
-            else:
-                downloaded_videos = get_video_materials(task_id, params, video_terms, audio_duration)
-
-            if not downloaded_videos:
-                sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
-                return
+        if not downloaded_videos:
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            return
 
         sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
-        logger.info(f"## [PARALLEL] Audio ({audio_duration}s) + {len(downloaded_videos)} materials ready.")
+        logger.info(f"## [SEQUENTIAL] Audio ({audio_duration}s) + {len(downloaded_videos)} materials ready.")
     else:
         # stop_at == "script" or "terms" handled above; shouldn't reach here
         return
