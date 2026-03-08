@@ -381,6 +381,74 @@ def search_images_pixabay(
 
     return []
 
+
+def generate_image_gemini(search_term: str, video_aspect: VideoAspect = VideoAspect.portrait) -> List[MaterialInfo]:
+    try:
+        import google.generativeai as genai
+        import tempfile
+        import os
+        from app.utils import md5
+        
+        api_key = config.app.get("gemini_api_key", "")
+        if not api_key:
+            logger.error("Gemini API key is not set, cannot generate image fallback.")
+            return []
+            
+        genai.configure(api_key=api_key)
+        # Using imagen-3.0-generate-001 or gemini-1.5-pro fallback? 
+        # Actually Google Generative AI Python SDK uses model='imagen-3.0-generate-001'
+        # Let's try to generate the image
+        aspect = VideoAspect(video_aspect)
+        aspect_ratio = "9:16" if aspect == VideoAspect.portrait else "16:9" if aspect == VideoAspect.landscape else "1:1"
+        
+        prompt = f"Cinematic, highly detailed, photorealistic visual representation of: {search_term}. No text, no watermark, perfectly framed."
+        
+        logger.info(f"Generating image via Gemini Imagen for term: {search_term}")
+        
+        # NOTE: Imagen API might require allowlist. But we'll implement it according to docs.
+        try:
+            from google.generativeai.types import RequestOptions
+            result = genai.generate_image(
+                prompt=prompt,
+                number_of_images=1,
+                output_mime_type="image/jpeg",
+                aspect_ratio=aspect_ratio,
+                model="imagen-3.0-generate-001"
+            )
+        except Exception as api_err:
+            logger.error(f"Gemini generate_image failed: {str(api_err)}. Retrying with gemini-2.0-flash experimental output if applicable, or failing...")
+            raise api_err
+            
+        if result and len(result.images) > 0:
+            image = result.images[0]
+            # Save it to a temporary path, save_video will pick it up
+            temp_dir = utils.storage_dir("temp_images")
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_path = os.path.join(temp_dir, f"gemini_{md5(search_term)}.jpg")
+            
+            # Using PIL image save method if available, or write raw bytes
+            if hasattr(image, '_pil_image'):
+                image._pil_image.save(temp_path)
+            elif hasattr(image, 'image') and hasattr(image.image, 'save'):
+                image.image.save(temp_path)
+            elif hasattr(image, 'content'):
+                with open(temp_path, "wb") as f:
+                    f.write(image.content)
+            else:
+                logger.error("Unknown image format returned from Gemini")
+                return []
+                
+            item = MaterialInfo()
+            item.provider = "gemini_image"
+            item.url = f"file://{temp_path}"
+            item.duration = 5.0
+            return [item]
+    except Exception as e:
+        logger.error(f"generate_image_gemini failed: {str(e)}")
+
+    return []
+
+
 def save_video(video_url: str, save_dir: str = "", search_term: str = "", provider: str = "") -> str:
     if not save_dir:
         save_dir = utils.storage_dir("cache_videos")
@@ -414,16 +482,21 @@ def save_video(video_url: str, save_dir: str = "", search_term: str = "", provid
     # If it's an image, download as image first then convert to 5s video
     if is_image:
         try:
-            with open(image_path, "wb") as f:
-                f.write(
-                    requests.get(
-                        video_url,
-                        headers=headers,
-                        proxies=config.proxy,
-                        verify=False,
-                        timeout=(60, 240),
-                    ).content
-                )
+            if video_url.startswith("file://"):
+                import shutil
+                local_path = video_url.replace("file://", "")
+                shutil.copy2(local_path, image_path)
+            else:
+                with open(image_path, "wb") as f:
+                    f.write(
+                        requests.get(
+                            video_url,
+                            headers=headers,
+                            proxies=config.proxy,
+                            verify=False,
+                            timeout=(60, 240),
+                        ).content
+                    )
             
             logger.info(f"Downloaded fallback image, converting to 5s clip: {image_path}")
             clip = ImageClip(image_path).set_duration(5.0)
@@ -546,11 +619,15 @@ def download_videos(
 
                 # [IMAGE FALLBACK LOGIC]: If the search failed, and it's our critical hook term, get an image
                 if not video_items and term_idx == 0:
-                    logger.warning(f"No videos found for Hook Term '{search_term}'. Falling back to cinematic image search...")
-                    if source_name == "pexels":
-                        video_items = search_images_pexels(search_term, video_aspect)
-                    else:
-                        video_items = search_images_pixabay(search_term, video_aspect)
+                    logger.warning(f"No videos found for Hook Term '{search_term}'. Falling back to Gemini Image generation...")
+                    video_items = generate_image_gemini(search_term, video_aspect)
+                    
+                    if not video_items:
+                        logger.warning("Gemini image fallback failed, falling back to Pexels/Pixabay images...")
+                        if source_name == "pexels":
+                            video_items = search_images_pexels(search_term, video_aspect)
+                        else:
+                            video_items = search_images_pixabay(search_term, video_aspect)
                     
                     if video_items:
                         logger.success(f"Successfully rescued Hook with {len(video_items)} cinematic images from {source_name}")
