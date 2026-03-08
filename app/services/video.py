@@ -972,29 +972,40 @@ def generate_video(
     if ass_subtitle_path and os.path.exists(ass_subtitle_path):
         logger.info(f"Burning native FFmpeg ASS subtitles: {ass_subtitle_path}")
         
-        # FFmpeg on Windows requires escaping backslashes and colon in the path for the -vf filter
-        if os.name == 'nt':
-            # e.g., C:\path\to\file.ass -> C\\:/path/to/file.ass
-            safe_ass_path = ass_subtitle_path.replace('\\', '/').replace(':', '\\\\:')
-            vf_string = f"ass='{safe_ass_path}'" 
-        else:
-            vf_string = f"ass='{ass_subtitle_path}'"
+        import subprocess
+        import shutil
+        import os
 
+        # Windows FFmpeg ASS filter path escaping is notoriously difficult.
+        # Instead, we copy the ASS file to the output directory and use a relative name.
+        ass_basename = "temp_subtitle.ass"
+        local_ass_path = os.path.join(output_dir, ass_basename)
+        try:
+            shutil.copy2(ass_subtitle_path, local_ass_path)
+        except shutil.SameFileError:
+            pass
+
+        # Use forward slashes for the input video path to be safe
+        safe_temp_output = temp_output_file.replace('\', '/')
+        safe_output_file = output_file.replace('\', '/')
+
+        vf_string = f"ass='{ass_basename}'"
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        
         ffmpeg_cmd = [
             ffmpeg_exe,
             "-y",
-            "-i", temp_output_file,
+            "-i", safe_temp_output,
             "-vf", vf_string,
             "-c:v", video_codec,
             "-b:v", "8000k",
             "-c:a", "copy",
-            output_file
+            safe_output_file
         ]
         
         try:
-            import subprocess
-            subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            # Run ffmpeg from the output directory so it can find the ASS file natively
+            subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, cwd=os.path.abspath(output_dir))
             os.remove(temp_output_file) # Clean up temp file
             logger.info(f"Successfully burned native subtitles to: {output_file}")
         except subprocess.CalledProcessError as e:
