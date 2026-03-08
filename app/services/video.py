@@ -713,21 +713,24 @@ def generate_video(
         logger.error(f"failed to load video clip {video_path}: {e}")
         raise
 
+    # Fetch accurate audio duration via imageio_ffmpeg (failsafe)
+    true_audio_duration = 0.0
+    import subprocess
+    import imageio_ffmpeg
     try:
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(audio_path)
-        true_audio_duration = len(audio) / 1000.0
-        
-        audio_clip = AudioFileClip(audio_path).with_effects(
-            [afx.AudioNormalize(), afx.MultiplyVolume(params.voice_volume)]
-        )
+        ffprobe_exe = imageio_ffmpeg.get_ffmpeg_exe().replace('ffmpeg', 'ffprobe')
+        cmd = [ffprobe_exe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_path]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        true_audio_duration = float(result.stdout.strip())
+        logger.info(f"Accurate audio duration fixed in generate_video: {true_audio_duration} seconds")
+    except Exception as ffprobe_err:
+        logger.warning(f"ffprobe failed to get accurate audio duration: {ffprobe_err}")
+
+    audio_clip = AudioFileClip(audio_path).with_effects(
+        [afx.AudioNormalize(), afx.MultiplyVolume(params.voice_volume)]
+    )
+    if true_audio_duration > 0.0:
         audio_clip.duration = true_audio_duration
-        
-    except Exception as e:
-        logger.warning(f"failed to load audio clip with pydub {audio_path}: {e}")
-        audio_clip = AudioFileClip(audio_path).with_effects(
-            [afx.AudioNormalize(), afx.MultiplyVolume(params.voice_volume)]
-        )
     
     # Strictly trim video duration to match the voice length (prevent overflow)
     if video_clip.duration > audio_clip.duration:

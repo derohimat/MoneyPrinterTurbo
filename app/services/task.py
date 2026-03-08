@@ -200,12 +200,18 @@ def generate_audio(task_id, params, video_script):
 
         
         try:
-            from pydub import AudioSegment
-            logger.info("Fixing potential VBR MP3 issues for MoviePy...")
-            snd = AudioSegment.from_file(audio_file)
-            snd.export(audio_file, format="mp3", bitrate="192k")
+            logger.info("Fixing potential VBR MP3 issues using FFmpeg for MoviePy...")
+            import imageio_ffmpeg
+            import subprocess
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            temp_audio = audio_file + ".temp.mp3"
+            subprocess.run([ffmpeg_exe, "-y", "-i", audio_file, "-c:a", "libmp3lame", "-b:a", "192k", temp_audio], 
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            import shutil
+            shutil.move(temp_audio, audio_file)
+            logger.info("VBR MP3 successfully converted to CBR.")
         except Exception as e:
-            logger.warning(f"pydub failed to fix VBR MP3: {e}")
+            logger.warning(f"FFmpeg failed to fix VBR MP3: {e}")
 
         audio_duration = math.ceil(voice.get_audio_duration(sub_maker))
         if getattr(params, "enable_hook", False) and sub_maker is None:
