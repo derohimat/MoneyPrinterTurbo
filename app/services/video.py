@@ -702,7 +702,7 @@ def generate_video(
                 "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
                 "/MoneyPrinterTurbo/resource/fonts/STHeitiMedium.ttc" # Internal fallback
             ]
-            for f in fallback_fonts:
+            for f in [os.path.join(utils.font_dir(), 'STHeitiMedium.ttc'), os.path.join(utils.font_dir(), 'Charm-Bold.ttf'), '/MoneyPrinterTurbo/resource/fonts/STHeitiMedium.ttc']:
                 if os.path.exists(f):
                     logger.warning(f"  ⚠️ falling back to system font: {f}")
                     font_path = f

@@ -392,7 +392,7 @@ def srt_to_ass(srt_file: str, ass_file: str, params: dict = None):
         "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,{font_name},{font_size},{primary_color},&H000000FF,{stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{stroke_width},0,2,10,10,60,1",
+        f"Style: Default,STHeitiMedium.ttc,{font_size},{primary_color},&H000000FF,{stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{stroke_width},0,2,10,10,60,1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
@@ -481,7 +481,7 @@ def srt_to_ass(srt_file: str, ass_file: str, params: dict = None):
         "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,{font_name},{font_size},{primary_color},&H000000FF,{stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{stroke_width},0,2,10,10,60,1",  # Alignment 2 is Bottom Center
+        f"Style: Default,STHeitiMedium.ttc,{font_size},{primary_color},&H000000FF,{stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{stroke_width},0,2,10,10,60,1",  # Alignment 2 is Bottom Center
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
