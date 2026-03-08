@@ -59,30 +59,36 @@ audio_codec = "aac"
 
 import subprocess
 
+import sys
+import subprocess
+import multiprocessing
+
 def get_best_video_codec():
+    """Custom tuned for i5-9400F + RX 550 4GB setup (macOS/Win10)"""
     try:
-        # Probe ffmpeg for available encoders
         result = subprocess.run(['ffmpeg', '-encoders'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         encoders = result.stdout.lower()
-        if 'h264_nvenc' in encoders:
-            logger.info("Hardware Acceleration Enabled: NVIDIA NVENC detected.")
-            return 'h264_nvenc'
-        elif 'h264_videotoolbox' in encoders:
-            logger.info("Hardware Acceleration Enabled: Apple VideoToolbox detected.")
-            return 'h264_videotoolbox'
-        elif 'h264_qsv' in encoders:
-            logger.info("Hardware Acceleration Enabled: Intel QSV detected.")
-            return 'h264_qsv'
-        elif 'h264_amf' in encoders:
-            logger.info("Hardware Acceleration Enabled: AMD AMF detected.")
-            return 'h264_amf'
+        
+        # CPU is i5-9400F (No iGPU), so we strictly rely on the AMD RX 550 4GB.
+        if sys.platform == 'darwin':
+            # macOS Big Sur uses VideoToolbox for AMD GPUs natively
+            if 'h264_videotoolbox' in encoders:
+                logger.info("Hardware Acceleration: Apple VideoToolbox (macOS + RX 550) detected.")
+                return 'h264_videotoolbox'
+        elif sys.platform == 'win32':
+            # Windows uses AMF for AMD GPUs
+            if 'h264_amf' in encoders:
+                logger.info("Hardware Acceleration: AMD AMF (Windows + RX 550) detected.")
+                return 'h264_amf'
     except Exception as e:
         logger.warning(f"Failed to probe ffmpeg encoders: {str(e)}")
     
-    logger.info("Hardware Acceleration not found, falling back to libx264.")
+    logger.info("Hardware Acceleration not found or OS not matched, falling back to libx264 (CPU).")
     return 'libx264'
 
 video_codec = get_best_video_codec()
+# Optimization for 32GB RAM & 6-Core i5-9400F: Increase thread count
+optimal_threads = min(6, multiprocessing.cpu_count()) if multiprocessing.cpu_count() else 4
 
 fps = 30
 
@@ -567,7 +573,7 @@ def combine_videos(
             merged.write_videofile(
                 combined_video_path,
                 codec=video_codec,
-                threads=threads,
+                threads=optimal_threads if threads == 2 else threads,
                 audio_codec="aac",
                 fps=fps,
                 bitrate="8000k",
@@ -938,7 +944,7 @@ def generate_video(
         codec=video_codec,
         audio_codec=audio_codec,
         temp_audiofile_path=output_dir,
-        threads=params.n_threads or 2,
+        threads=params.n_threads or optimal_threads,
         logger=None,
         fps=fps,
         bitrate="8000k",
