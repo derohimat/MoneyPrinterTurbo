@@ -442,29 +442,31 @@ def combine_videos(
             shuffle_side = random.choice(["left", "right", "top", "bottom"])
             if not video_transition_mode or video_transition_mode.value == VideoTransitionMode.none.value:
                 clip = clip
-            elif video_transition_mode.value == VideoTransitionMode.fade_in.value:
-                clip = video_effects.fadein_transition(clip, transition_speed)
-            elif video_transition_mode.value == VideoTransitionMode.fade_out.value:
-                clip = video_effects.fadeout_transition(clip, transition_speed)
-            elif video_transition_mode.value == VideoTransitionMode.slide_in.value:
-                clip = video_effects.slidein_transition(clip, transition_speed, shuffle_side)
-            elif video_transition_mode.value == VideoTransitionMode.slide_out.value:
-                clip = video_effects.slideout_transition(clip, transition_speed, shuffle_side)
-            elif video_transition_mode.value == VideoTransitionMode.whip_pan.value:
-                clip = video_effects.whip_pan_transition(clip, transition_speed)
-            elif video_transition_mode.value == VideoTransitionMode.zoom.value:
-                clip = video_effects.zoom_transition(clip, transition_speed)
-            elif video_transition_mode.value == VideoTransitionMode.shuffle.value:
-                transition_funcs = [
-                    lambda c: video_effects.fadein_transition(c, transition_speed),
-                    lambda c: video_effects.fadeout_transition(c, transition_speed),
-                    lambda c: video_effects.slidein_transition(c, transition_speed, shuffle_side),
-                    lambda c: video_effects.slideout_transition(c, transition_speed, shuffle_side),
-                    lambda c: video_effects.whip_pan_transition(c, transition_speed),
-                    lambda c: video_effects.zoom_transition(c, transition_speed),
-                ]
-                shuffle_transition = random.choice(transition_funcs)
-                clip = shuffle_transition(clip)
+            else:
+                transition_val = video_transition_mode.value
+                if transition_val == VideoTransitionMode.fade_in.value:
+                    clip = video_effects.fadein_transition(clip, transition_speed)
+                elif transition_val == VideoTransitionMode.fade_out.value:
+                    clip = video_effects.fadeout_transition(clip, transition_speed)
+                elif transition_val == VideoTransitionMode.slide_in.value:
+                    clip = video_effects.slidein_transition(clip, transition_speed, shuffle_side)
+                elif transition_val == VideoTransitionMode.slide_out.value:
+                    clip = video_effects.slideout_transition(clip, transition_speed, shuffle_side)
+                elif transition_val == VideoTransitionMode.whip_pan.value:
+                    clip = video_effects.whip_pan_transition(clip, transition_speed)
+                elif transition_val == VideoTransitionMode.zoom.value:
+                    clip = video_effects.zoom_transition(clip, transition_speed)
+                elif transition_val == VideoTransitionMode.shuffle.value:
+                    transition_funcs = [
+                        lambda c: video_effects.fadein_transition(c, transition_speed),
+                        lambda c: video_effects.fadeout_transition(c, transition_speed),
+                        lambda c: video_effects.slidein_transition(c, transition_speed, shuffle_side),
+                        lambda c: video_effects.slideout_transition(c, transition_speed, shuffle_side),
+                        lambda c: video_effects.whip_pan_transition(c, transition_speed),
+                        lambda c: video_effects.zoom_transition(c, transition_speed),
+                    ]
+                    shuffle_transition = random.choice(transition_funcs)
+                    clip = shuffle_transition(clip)
 
             # T4-1: Pattern Interrupts
             # Check if we should apply effect (every 5-8s)
