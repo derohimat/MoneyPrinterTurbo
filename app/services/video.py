@@ -986,8 +986,8 @@ def generate_video(
             pass
 
         # Use forward slashes for the input video path to be safe
-        safe_temp_output = temp_output_file.replace('\', '/')
-        safe_output_file = output_file.replace('\', '/')
+        safe_temp_output = temp_output_file.replace('\\', '/')
+        safe_output_file = output_file.replace('\\', '/')
 
         vf_string = f"ass='{ass_basename}'"
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
