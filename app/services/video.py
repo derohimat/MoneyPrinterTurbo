@@ -56,7 +56,34 @@ class SubClippedVideoClip:
 
 
 audio_codec = "aac"
-video_codec = "libx264"
+
+import subprocess
+
+def get_best_video_codec():
+    try:
+        # Probe ffmpeg for available encoders
+        result = subprocess.run(['ffmpeg', '-encoders'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        encoders = result.stdout.lower()
+        if 'h264_nvenc' in encoders:
+            logger.info("Hardware Acceleration Enabled: NVIDIA NVENC detected.")
+            return 'h264_nvenc'
+        elif 'h264_videotoolbox' in encoders:
+            logger.info("Hardware Acceleration Enabled: Apple VideoToolbox detected.")
+            return 'h264_videotoolbox'
+        elif 'h264_qsv' in encoders:
+            logger.info("Hardware Acceleration Enabled: Intel QSV detected.")
+            return 'h264_qsv'
+        elif 'h264_amf' in encoders:
+            logger.info("Hardware Acceleration Enabled: AMD AMF detected.")
+            return 'h264_amf'
+    except Exception as e:
+        logger.warning(f"Failed to probe ffmpeg encoders: {str(e)}")
+    
+    logger.info("Hardware Acceleration not found, falling back to libx264.")
+    return 'libx264'
+
+video_codec = get_best_video_codec()
+
 fps = 30
 
 def close_clip(clip):
@@ -467,6 +494,7 @@ def combine_videos(
                 merged = merged.subclipped(0, audio_duration)
 
             merged.write_videofile(
+                codec=video_codec,
                 combined_video_path,
                 threads=threads,
                 audio_codec="aac",
@@ -835,6 +863,7 @@ def generate_video(
     # T0-2: bitrate control for base video (no subtitles yet)
     temp_output_file = output_file.replace(".mp4", "_nosub.mp4")
     video_clip.write_videofile(
+        codec=video_codec,
         temp_output_file,
         audio_codec=audio_codec,
         temp_audiofile_path=output_dir,
@@ -932,7 +961,7 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
 
             # Output the video to a file.
             video_file = f"{material.url}.mp4"
-            final_clip.write_videofile(video_file, fps=30, logger=None)
+            final_clip.write_videofile(video_file, codec=video_codec, fps=30, logger=None)
             close_clip(clip)
             material.url = video_file
             logger.success(f"image processed: {video_file}")

@@ -370,13 +370,96 @@ def correct(subtitle_file, video_script, audio_duration: float = 0.0):
 
 
 def srt_to_ass(srt_file: str, ass_file: str, params: dict = None):
-    """
-    Converts an SRT subtitle file to an Advanced SubStation Alpha (.ass) file.
-    Uses styling compatible with voice.py.
-    """
     if not os.path.exists(srt_file):
         logger.error(f"SRT file not found: {srt_file}")
         return False
+
+    if params is None:
+        params = {}
+
+    font_name = params.get("font_name", "Arial")
+    font_size = int(params.get("font_size", 60))
+    primary_color = "&HFFFFFF&"
+    highlight_color = "&H00FFFF&" # Yellow/Gold
+    stroke_color = "&H000000&"
+    stroke_width = int(params.get("stroke_width", 3))
+
+    ass_content = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "WrapStyle: 1",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Default,{font_name},{font_size},{primary_color},&H000000FF,{stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{stroke_width},0,2,10,10,60,1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+    ]
+
+    def parse_srt_time(time_str):
+        h, m, s_ms = time_str.split(':')
+        s, ms = s_ms.split(',')
+        return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + int(ms)
+        
+    def to_ass_time(ms):
+        h = ms // 3600000
+        ms %= 3600000
+        m = ms // 60000
+        ms %= 60000
+        s = ms // 1000
+        cs = (ms % 1000) // 10
+        return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+    try:
+        from html import unescape
+        from app.services.subtitle import file_to_subtitles
+        items = file_to_subtitles(srt_file)
+        dialogues = []
+        for index, time_range, text in items:
+            times = time_range.split(" --> ")
+            if len(times) != 2: continue
+            
+            start_ms = parse_srt_time(times[0].strip())
+            end_ms = parse_srt_time(times[1].strip())
+            
+            text = unescape(text).strip()
+            if not text: continue
+            
+            # Words might have newlines, clean them up for Hormozi style
+            words = text.replace("\n", " ").split()
+            if not words: continue
+            
+            total_chars = sum(len(w) for w in words)
+            total_time = end_ms - start_ms
+            
+            current_ms = start_ms
+            for i, active_word in enumerate(words):
+                word_duration = int(total_time * (len(active_word) / total_chars)) if total_chars > 0 else total_time // len(words)
+                word_end_ms = current_ms + word_duration
+                
+                line_words = []
+                for j, w in enumerate(words):
+                    if j == i:
+                        # Hormozi style: yellow and larger font scale
+                        line_words.append(f"{{\\c{highlight_color}\\fscx115\\fscy115}}{w}{{\\c{primary_color}\\fscx100\\fscy100}}")
+                    else:
+                        line_words.append(w)
+                
+                colored_text = " ".join(line_words)
+                dialogue = f"Dialogue: 0,{to_ass_time(current_ms)},{to_ass_time(word_end_ms)},Default,,0,0,0,,{colored_text}"
+                dialogues.append(dialogue)
+                current_ms = word_end_ms
+
+        ass_content.extend(dialogues)
+        with open(ass_file, "w", encoding="utf-8") as file:
+            file.write("\n".join(ass_content) + "\n")
+        return True
+    except Exception as e:
+        logger.error(f"failed to convert srt to ass: {str(e)}")
+        return False
+
 
     if params is None:
         params = {}
