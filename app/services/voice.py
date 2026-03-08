@@ -1863,8 +1863,7 @@ def create_ass_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str, para
             end_ms = end_time / 10000.0
             total_time = end_ms - start_ms
             
-            words = sub.replace("
-", " ").split()
+            words = sub.replace("\n", " ").split()
             if not words: continue
             
             total_chars = sum(len(w) for w in words)
@@ -1877,7 +1876,7 @@ def create_ass_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str, para
                 line_words = []
                 for j, w in enumerate(words):
                     if j == i:
-                        line_words.append(f"{{\c{highlight_color}\fscx115\fscy115}}{w}{{\c{primary_color}\fscx100\fscy100}}")
+                        line_words.append(fr"{{\c{highlight_color}\fscx115\fscy115}}{w}{{\c{primary_color}\fscx100\fscy100}}")
                     else:
                         line_words.append(w)
                 
@@ -1890,9 +1889,7 @@ def create_ass_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str, para
         ass_content.extend(dialogues)
 
         with open(subtitle_file, "w", encoding="utf-8") as file:
-            file.write("
-".join(ass_content) + "
-")
+            file.write("\n".join(ass_content) + "\n")
             
         logger.info(f"completed, Hormozi ASS subtitle file created: {subtitle_file}")
     except Exception as e:
