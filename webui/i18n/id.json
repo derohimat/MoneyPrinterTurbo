@@ -1,0 +1,7 @@
+{
+    "Language": "Indonesian",
+    "Translation": {
+        "FFmpeg not found! Video generation will fail. Please install FFmpeg and add it to your PATH, or set ffmpeg_path in config.toml.": "FFmpeg tidak ditemukan! Pembuatan video akan gagal. Silakan instal FFmpeg dan tambahkan ke PATH, atau atur ffmpeg_path di config.toml.",
+        "FFprobe not found! Audio duration detection might be inaccurate. It is recommended to install a full FFmpeg build.": "FFprobe tidak ditemukan! Deteksi durasi audio mungkin tidak akurat. Disarankan untuk menginstal FFmpeg versi lengkap."
+    }
+}

@@ -281,3 +281,61 @@ def open_folder(path: str):
     except Exception as e:
         logger.error(f"failed to open folder: {e}")
         return False
+
+def check_ffmpeg_status() -> dict:
+    """
+    Check if ffmpeg and ffprobe are available.
+    Returns a dictionary with status information.
+    """
+    import shutil
+    import subprocess
+    import imageio_ffmpeg
+
+    status = {
+        "ffmpeg": False,
+        "ffprobe": False,
+        "ffmpeg_path": "",
+        "ffprobe_path": "",
+        "is_bundled": False
+    }
+
+    # 1. Check system PATH or configured path
+    # We follow the logic in app/config/config.py which sets IMAGEIO_FFMPEG_EXE
+    ffmpeg_exe = os.environ.get("IMAGEIO_FFMPEG_EXE") or shutil.which("ffmpeg")
+
+    if ffmpeg_exe and os.path.exists(ffmpeg_exe):
+        status["ffmpeg"] = True
+        status["ffmpeg_path"] = ffmpeg_exe
+    else:
+        # Fallback to imageio_ffmpeg bundled
+        try:
+            bundled_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            if bundled_exe and os.path.exists(bundled_exe):
+                # Verify it's not just a string but a real file
+                if os.path.isfile(bundled_exe):
+                    status["ffmpeg"] = True
+                    status["ffmpeg_path"] = bundled_exe
+                    status["is_bundled"] = True
+        except:
+            pass
+
+    # 2. Check ffprobe
+    # ffprobe usually lives in the same dir as ffmpeg
+    if status["ffmpeg"]:
+        ffmpeg_dir = os.path.dirname(status["ffmpeg_path"])
+        # Try same dir
+        for ext in ["", ".exe"]:
+            p = os.path.join(ffmpeg_dir, "ffprobe" + ext)
+            if os.path.exists(p):
+                status["ffprobe"] = True
+                status["ffprobe_path"] = p
+                break
+
+    # If still not found, check system PATH
+    if not status["ffprobe"]:
+        ffprobe_exe = shutil.which("ffprobe")
+        if ffprobe_exe:
+            status["ffprobe"] = True
+            status["ffprobe_path"] = ffprobe_exe
+
+    return status

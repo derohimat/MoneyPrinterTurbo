@@ -87,8 +87,11 @@ def get_best_video_codec():
     return 'libx264'
 
 video_codec = get_best_video_codec()
+# Use a compatible preset for AMD AMF (medium fails because it's only for x264/x265)
+video_preset = "quality" if video_codec == "h264_amf" else "medium"
 # Optimization for 32GB RAM & 6-Core i5-9400F: Increase thread count
 optimal_threads = min(6, multiprocessing.cpu_count()) if multiprocessing.cpu_count() else 4
+
 
 fps = 30
 
@@ -255,11 +258,14 @@ def combine_videos(
             logger.warning(f"pydub failed to get accurate audio duration: {e}")
             import subprocess
             try:
-                import imageio_ffmpeg
-                ffprobe_exe = imageio_ffmpeg.get_ffmpeg_exe().replace('ffmpeg', 'ffprobe')
-                cmd = [ffprobe_exe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
-                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                return float(result.stdout.strip())
+                status = utils.check_ffmpeg_status()
+                if status["ffprobe"]:
+                    ffprobe_exe = status["ffprobe_path"]
+                    cmd = [ffprobe_exe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+                    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    return float(result.stdout.strip())
+                else:
+                    logger.warning("ffprobe not found by check_ffmpeg_status")
             except Exception as e2:
                 logger.warning(f"ffprobe failed to get accurate audio duration: {e2}")
         return audio_clip.duration
@@ -507,7 +513,7 @@ def combine_videos(
             
             # write clip to temp file (T0-2: bitrate control)
             clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
-            clip.write_videofile(clip_file, logger=None, fps=fps, codec=video_codec, bitrate="8000k")
+            clip.write_videofile(clip_file, logger=None, fps=fps, codec=video_codec, preset=video_preset, bitrate="8000k")
             
             close_clip(clip)
         
@@ -579,6 +585,7 @@ def combine_videos(
             merged.write_videofile(
                 combined_video_path,
                 codec=video_codec,
+                preset=video_preset,
                 threads=optimal_threads if threads == 2 else threads,
                 audio_codec="aac",
                 fps=fps,

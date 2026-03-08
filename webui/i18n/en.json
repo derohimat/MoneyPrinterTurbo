@@ -117,6 +117,8 @@
     "Pixabay API Key added successfully": "Pixabay API Key added successfully",
     "Select Pixabay API Key to delete": "Select Pixabay API Key to delete",
     "Delete Selected Pixabay API Key": "Delete Selected Pixabay API Key",
-    "Pixabay API Key deleted successfully": "Pixabay API Key deleted successfully"
+    "Pixabay API Key deleted successfully": "Pixabay API Key deleted successfully",
+    "FFmpeg not found! Video generation will fail. Please install FFmpeg and add it to your PATH, or set ffmpeg_path in config.toml.": "FFmpeg not found! Video generation will fail. Please install FFmpeg and add it to your PATH, or set ffmpeg_path in config.toml.",
+    "FFprobe not found! Audio duration detection might be inaccurate. It is recommended to install a full FFmpeg build.": "FFprobe not found! Audio duration detection might be inaccurate. It is recommended to install a full FFmpeg build."
   }
 }

@@ -60,7 +60,16 @@ start_worker()
 
 # Task History moved to separate page
 
+
 st.divider()
+
+# FFmpeg Check
+ffmpeg_status = utils.check_ffmpeg_status()
+if not ffmpeg_status["ffmpeg"]:
+    st.error(tr("FFmpeg not found! Video generation will fail. Please install FFmpeg and add it to your PATH, or set ffmpeg_path in config.toml."))
+elif not ffmpeg_status["ffprobe"]:
+    st.warning(tr("FFprobe not found! Audio duration detection might be inaccurate. It is recommended to install a full FFmpeg build."))
+
 
 streamlit_style = """
 <style>
