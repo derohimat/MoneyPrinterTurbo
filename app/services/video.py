@@ -134,10 +134,7 @@ def delete_files(files: List[str] | str):
             pass
 
 def _get_mood_from_script(script_text: str) -> str:
-    """Determine mood using basic heuristic or fallback LLM if needed."""
     text = script_text.lower()
-    
-    # Simple heuristic to avoid burning LLM tokens just for music
     moods = {
         'horror': ['scary', 'blood', 'ghost', 'dark', 'evil', 'creepy', 'nightmare', 'misteri', 'seram', 'hantu'],
         'epic': ['history', 'battle', 'war', 'empire', 'king', 'ancient', 'hero', 'sejarah', 'perang', 'kerajaan'],
@@ -146,11 +143,51 @@ def _get_mood_from_script(script_text: str) -> str:
         'calm': ['peace', 'relax', 'nature', 'meditation', 'tenang', 'damai', 'alam'],
         'tech': ['future', 'robot', 'ai', 'cyber', 'technology', 'teknologi', 'masa depan'],
     }
-    
     for mood, keywords in moods.items():
         if any(kw in text for kw in keywords):
             return mood
     return "general"
+
+def _download_dynamic_bgm(mood: str, song_dir: str) -> str:
+    """Dynamically download background music from YouTube using yt-dlp."""
+    import subprocess
+    import os
+    import glob
+    import uuid
+    
+    mood_dir = os.path.join(song_dir, mood)
+    os.makedirs(mood_dir, exist_ok=True)
+    
+    # Check if we already have songs, maybe reuse them 80% of the time
+    existing_songs = glob.glob(os.path.join(mood_dir, "*.mp3"))
+    if existing_songs and random.random() < 0.8:
+        return random.choice(existing_songs)
+        
+    search_query = f"{mood} background music no copyright"
+    logger.info(f"Dynamically downloading BGM for mood '{mood}' via YouTube (query: {search_query})")
+    
+    output_template = os.path.join(mood_dir, f"{mood}_{uuid.uuid4().hex[:8]}.%(ext)s")
+    
+    try:
+        # Require yt-dlp to be installed or available in PATH
+        subprocess.run([
+            "yt-dlp",
+            "ytsearch1:" + search_query,
+            "-x", "--audio-format", "mp3",
+            "--audio-quality", "5",
+            "--match-filter", "duration < 600", # Less than 10 mins
+            "-o", output_template
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        new_songs = glob.glob(os.path.join(mood_dir, "*.mp3"))
+        if new_songs:
+            return sorted(new_songs, key=os.path.getctime, reverse=True)[0]
+    except Exception as e:
+        logger.warning(f"Failed to dynamically download BGM: {e}")
+        if existing_songs:
+            return random.choice(existing_songs)
+            
+    return ""
 
 def get_bgm_file(bgm_type: str = "random", bgm_file: str = "", script_text: str = ""):
     if not bgm_type:
@@ -161,29 +198,23 @@ def get_bgm_file(bgm_type: str = "random", bgm_file: str = "", script_text: str 
 
     song_dir = utils.song_dir()
     
-    # If a script is provided, try to match mood to subfolders
     if script_text and bgm_type == "random":
         mood = _get_mood_from_script(script_text)
         logger.info(f"Smart BGM Matcher detected mood: {mood}")
         
-        # Check if a subfolder exists for this mood
-        mood_dir = os.path.join(song_dir, mood)
-        if os.path.exists(mood_dir) and os.path.isdir(mood_dir):
-            files = glob.glob(os.path.join(mood_dir, "*.mp3"))
-            if files:
-                chosen = random.choice(files)
-                logger.info(f"Selected BGM for mood '{mood}': {chosen}")
-                return chosen
+        dynamic_bgm = _download_dynamic_bgm(mood, song_dir)
+        if dynamic_bgm:
+            logger.info(f"Selected Dynamic BGM: {dynamic_bgm}")
+            return dynamic_bgm
 
-    # Fallback to random in root song_dir or any subdirectories
+    # Fallback to random in root song_dir
     if bgm_type == "random":
-        # Recursively find all mp3s
         files = glob.glob(os.path.join(song_dir, "**", "*.mp3"), recursive=True)
         if not files:
             files = glob.glob(os.path.join(song_dir, "*.mp3"))
         if files:
             chosen = random.choice(files)
-            logger.info(f"Selected random BGM: {chosen}")
+            logger.info(f"Selected fallback random BGM: {chosen}")
             return chosen
 
     return ""
