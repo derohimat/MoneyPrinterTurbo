@@ -440,7 +440,7 @@ def combine_videos(
                 clip = video_effects.ken_burns_effect(clip, zoom_factor=1.1, pan_direction="random")
 
             shuffle_side = random.choice(["left", "right", "top", "bottom"])
-            if video_transition_mode.value == VideoTransitionMode.none.value:
+            if not video_transition_mode or video_transition_mode.value == VideoTransitionMode.none.value:
                 clip = clip
             elif video_transition_mode.value == VideoTransitionMode.fade_in.value:
                 clip = video_effects.fadein_transition(clip, transition_speed)
