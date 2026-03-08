@@ -133,18 +133,58 @@ def delete_files(files: List[str] | str):
         except:
             pass
 
-def get_bgm_file(bgm_type: str = "random", bgm_file: str = ""):
+def _get_mood_from_script(script_text: str) -> str:
+    """Determine mood using basic heuristic or fallback LLM if needed."""
+    text = script_text.lower()
+    
+    # Simple heuristic to avoid burning LLM tokens just for music
+    moods = {
+        'horror': ['scary', 'blood', 'ghost', 'dark', 'evil', 'creepy', 'nightmare', 'misteri', 'seram', 'hantu'],
+        'epic': ['history', 'battle', 'war', 'empire', 'king', 'ancient', 'hero', 'sejarah', 'perang', 'kerajaan'],
+        'happy': ['funny', 'laugh', 'joke', 'smile', 'happy', 'lucu', 'tawa', 'senang'],
+        'sad': ['cry', 'tears', 'heartbreak', 'tragedy', 'sedih', 'tangis', 'tragedi'],
+        'calm': ['peace', 'relax', 'nature', 'meditation', 'tenang', 'damai', 'alam'],
+        'tech': ['future', 'robot', 'ai', 'cyber', 'technology', 'teknologi', 'masa depan'],
+    }
+    
+    for mood, keywords in moods.items():
+        if any(kw in text for kw in keywords):
+            return mood
+    return "general"
+
+def get_bgm_file(bgm_type: str = "random", bgm_file: str = "", script_text: str = ""):
     if not bgm_type:
         return ""
 
     if bgm_file and os.path.exists(bgm_file):
         return bgm_file
 
+    song_dir = utils.song_dir()
+    
+    # If a script is provided, try to match mood to subfolders
+    if script_text and bgm_type == "random":
+        mood = _get_mood_from_script(script_text)
+        logger.info(f"Smart BGM Matcher detected mood: {mood}")
+        
+        # Check if a subfolder exists for this mood
+        mood_dir = os.path.join(song_dir, mood)
+        if os.path.exists(mood_dir) and os.path.isdir(mood_dir):
+            files = glob.glob(os.path.join(mood_dir, "*.mp3"))
+            if files:
+                chosen = random.choice(files)
+                logger.info(f"Selected BGM for mood '{mood}': {chosen}")
+                return chosen
+
+    # Fallback to random in root song_dir or any subdirectories
     if bgm_type == "random":
-        suffix = "*.mp3"
-        song_dir = utils.song_dir()
-        files = glob.glob(os.path.join(song_dir, suffix))
-        return random.choice(files)
+        # Recursively find all mp3s
+        files = glob.glob(os.path.join(song_dir, "**", "*.mp3"), recursive=True)
+        if not files:
+            files = glob.glob(os.path.join(song_dir, "*.mp3"))
+        if files:
+            chosen = random.choice(files)
+            logger.info(f"Selected random BGM: {chosen}")
+            return chosen
 
     return ""
 
@@ -719,7 +759,7 @@ def generate_video(
         audio_source.append(video_clip.audio)
 
     # 2. Add BGM if configured
-    bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
+    bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file, script_text=getattr(params, 'video_subject', getattr(params, 'script', '')))
     if bgm_file:
         try:
             bgm_clip = AudioFileClip(bgm_file)
