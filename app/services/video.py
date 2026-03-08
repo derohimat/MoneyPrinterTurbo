@@ -241,25 +241,31 @@ def combine_videos(
     color_enhancement: bool = True,
     enable_pattern_interrupts: bool = True,
 ) -> str:
-    audio_clip = AudioFileClip(audio_file)
-    # Ensure Enums
-    if isinstance(video_aspect, str):
-        video_aspect = VideoAspect(video_aspect)
-    if isinstance(video_concat_mode, str):
-        video_concat_mode = VideoConcatMode(video_concat_mode)
-    if isinstance(video_transition_mode, str):
-         # Handle None case if necessary, but str usually means valid value
-         # Unless it's "None" string?
-         if video_transition_mode == "None":
-             video_transition_mode = VideoTransitionMode.none
-         else:
-             video_transition_mode = VideoTransitionMode(video_transition_mode)
-             
-    if video_transition_mode is None:
-        video_transition_mode = VideoTransitionMode.none
 
-    audio_duration = audio_clip.duration
-    logger.info(f"audio duration: {audio_duration} seconds")
+
+    audio_clip = AudioFileClip(audio_file)
+    
+    # [FIX] VBR MP3 duration bug in MoviePy: Use ffprobe/pydub for accurate audio duration
+    def get_accurate_audio_duration(file_path):
+        try:
+            from pydub import AudioSegment
+            audio = AudioSegment.from_file(file_path)
+            return len(audio) / 1000.0
+        except Exception as e:
+            logger.warning(f"pydub failed to get accurate audio duration: {e}")
+            import subprocess
+            try:
+                import imageio_ffmpeg
+                ffprobe_exe = imageio_ffmpeg.get_ffmpeg_exe().replace('ffmpeg', 'ffprobe')
+                cmd = [ffprobe_exe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                return float(result.stdout.strip())
+            except Exception as e2:
+                logger.warning(f"ffprobe failed to get accurate audio duration: {e2}")
+        return audio_clip.duration
+
+    audio_duration = get_accurate_audio_duration(audio_file)
+    logger.info(f"Accurate audio duration fixed: {audio_duration} seconds (was {audio_clip.duration})")
     # Required duration of each clip
     req_dur = audio_duration / len(video_paths)
     req_dur = max_clip_duration
@@ -366,12 +372,12 @@ def combine_videos(
 
     logger.debug(f"generated {len(subclipped_items)} subclips using {pacing_mode} pacing")
     
-    # Assign to processed_clips directly as we already filled the duration
-    processed_clips = subclipped_items
+    # Create a new list for the final processed clips
+    processed_clips = []
 
     # Process the generated clips
     video_duration = 0.0 # Track processed duration
-    for i, subclipped_item in enumerate(processed_clips):
+    for i, subclipped_item in enumerate(subclipped_items):
         # No need for `if video_duration > audio_duration: break` here, as `processed_clips` is already sized.
         
         logger.debug(f"processing clip {i+1}: {subclipped_item.width}x{subclipped_item.height}, current duration: {video_duration:.2f}s, remaining: {audio_duration - video_duration:.2f}s")
@@ -708,12 +714,20 @@ def generate_video(
         raise
 
     try:
+        from pydub import AudioSegment
+        audio = AudioSegment.from_file(audio_path)
+        true_audio_duration = len(audio) / 1000.0
+        
         audio_clip = AudioFileClip(audio_path).with_effects(
             [afx.AudioNormalize(), afx.MultiplyVolume(params.voice_volume)]
         )
+        audio_clip.duration = true_audio_duration
+        
     except Exception as e:
-        logger.error(f"failed to load audio clip {audio_path}: {e}")
-        raise
+        logger.warning(f"failed to load audio clip with pydub {audio_path}: {e}")
+        audio_clip = AudioFileClip(audio_path).with_effects(
+            [afx.AudioNormalize(), afx.MultiplyVolume(params.voice_volume)]
+        )
     
     # Strictly trim video duration to match the voice length (prevent overflow)
     if video_clip.duration > audio_clip.duration:
