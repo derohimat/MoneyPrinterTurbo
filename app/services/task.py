@@ -199,6 +199,14 @@ def generate_audio(task_id, params, video_script):
                 logger.error(f"failed to pad audio with silence for hook: {e}. Falling back to unmodified audio.")
 
         
+        try:
+            from pydub import AudioSegment
+            logger.info("Fixing potential VBR MP3 issues for MoviePy...")
+            snd = AudioSegment.from_file(audio_file)
+            snd.export(audio_file, format="mp3", bitrate="192k")
+        except Exception as e:
+            logger.warning(f"pydub failed to fix VBR MP3: {e}")
+
         audio_duration = math.ceil(voice.get_audio_duration(sub_maker))
         if getattr(params, "enable_hook", False) and sub_maker is None:
             # If sub_maker is None but hook is enabled (e.g., custom provider or error),
