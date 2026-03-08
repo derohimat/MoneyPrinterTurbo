@@ -103,24 +103,89 @@ def generate_thumbnails(video_path: str, output_dir: str, count: int = 3, text_o
             
             # Add text overlay if provided
             if text_overlay:
+                from PIL import ImageDraw, ImageFont
                 draw = ImageDraw.Draw(img)
                 # Load font
                 try:
-                    font_size = int(img.height * 0.1) # 10% of height
-                    font = ImageFont.truetype("arial.ttf", font_size)
-                except:
+                    font_size = int(img.height * 0.08) # 8% of height for bold title
+                    # Try to use STHeitiMedium or fallback
+                    from app.utils.utils import font_dir
+                    import os
+                    font_path = os.path.join(font_dir(), "STHeitiMedium.ttc")
+                    if not os.path.exists(font_path):
+                        font_path = "arial.ttf"
+                    font = ImageFont.truetype(font_path, font_size)
+                except Exception as e:
+                    logger.warning(f"Failed to load custom font for thumbnail: {e}")
                     font = ImageFont.load_default()
                     
-                # Draw text with shadow
-                # Center
-                # text_w = draw.textlength(text_overlay, font=font)
-                # x = (img.width - text_w) / 2
-                # y = img.height * 0.8 # Bottom
+                # Calculate text dimensions (Handle multiline if text is long)
+                # Wrap text if it exceeds 90% of image width
+                max_width = img.width * 0.9
+                words = text_overlay.split()
+                lines = []
+                current_line = []
                 
-                # Draw shadow
-                # draw.text((x+4, y+4), text_overlay, font=font, fill="black")
-                # draw.text((x, y), text_overlay, font=font, fill="white")
-                pass
+                for word in words:
+                    current_line.append(word)
+                    # Check width
+                    test_line = " ".join(current_line)
+                    # PIL 10+ uses textbbox or textlength
+                    try:
+                        bbox = draw.textbbox((0, 0), test_line, font=font)
+                        w = bbox[2] - bbox[0]
+                    except AttributeError:
+                        w, _ = draw.textsize(test_line, font=font)
+                        
+                    if w > max_width:
+                        # Exceeded, pop the last word and finalize the line
+                        if len(current_line) > 1:
+                            current_line.pop()
+                            lines.append(" ".join(current_line))
+                            current_line = [word]
+                        else:
+                            # Single word is too long, just add it anyway
+                            lines.append(word)
+                            current_line = []
+                if current_line:
+                    lines.append(" ".join(current_line))
+                    
+                # Draw multiline text centered horizontally, placed at the top (15% from top)
+                # Typical TikTok/Shorts cover style: Bold White text, Heavy Black Stroke/Shadow
+                try:
+                    line_height = bbox[3] - bbox[1] if 'bbox' in locals() else draw.textsize("A", font=font)[1]
+                except:
+                    line_height = font_size
+                    
+                y = img.height * 0.15 # Top 15%
+                
+                for line in lines:
+                    try:
+                        bbox = draw.textbbox((0, 0), line, font=font)
+                        w = bbox[2] - bbox[0]
+                    except AttributeError:
+                        w, _ = draw.textsize(line, font=font)
+                        
+                    x = (img.width - w) / 2
+                    
+                    # Heavy Stroke/Shadow effect (Draw text multiple times slightly offset)
+                    shadow_color = "black"
+                    text_color = "yellow" if "hook" in line.lower() or len(lines) == 1 else "white"
+                    stroke_width = max(3, int(font_size * 0.05))
+                    
+                    # Draw thick stroke
+                    for offset_x in range(-stroke_width, stroke_width + 1):
+                        for offset_y in range(-stroke_width, stroke_width + 1):
+                            if offset_x == 0 and offset_y == 0: continue
+                            draw.text((x + offset_x, y + offset_y), line, font=font, fill=shadow_color)
+                            
+                    # Draw drop shadow (offset bottom right)
+                    draw.text((x + stroke_width * 2, y + stroke_width * 2), line, font=font, fill=shadow_color)
+                    
+                    # Draw main text
+                    draw.text((x, y), line, font=font, fill=text_color)
+                    
+                    y += line_height * 1.2 # Move down for next line
 
             filename = f"thumbnail_{i+1}_{style_name}.jpg"
             path = os.path.join(output_dir, filename)
@@ -133,3 +198,12 @@ def generate_thumbnails(video_path: str, output_dir: str, count: int = 3, text_o
     except Exception as e:
         logger.error(f"failed to generate thumbnails: {e}")
         return []
+
+
+def generate_thumbnail(video_path: str, title: str, output_path: str):
+    import shutil
+    res = generate_thumbnails(video_path, os.path.dirname(output_path), 1, title)
+    if res:
+        shutil.copy(res[0], output_path)
+        return output_path
+    return None
