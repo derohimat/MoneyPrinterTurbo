@@ -534,8 +534,8 @@ def combine_videos(
                 merged = merged.subclipped(0, audio_duration)
 
             merged.write_videofile(
-                codec=video_codec,
                 combined_video_path,
+                codec=video_codec,
                 threads=threads,
                 audio_codec="aac",
                 fps=fps,
@@ -903,8 +903,8 @@ def generate_video(
     # T0-2: bitrate control for base video (no subtitles yet)
     temp_output_file = output_file.replace(".mp4", "_nosub.mp4")
     video_clip.write_videofile(
-        codec=video_codec,
         temp_output_file,
+        codec=video_codec,
         audio_codec=audio_codec,
         temp_audiofile_path=output_dir,
         threads=params.n_threads or 2,
