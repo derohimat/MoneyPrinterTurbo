@@ -629,9 +629,16 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
             # Collect materials result
             if future_materials is not None:
-                downloaded_videos = future_materials.result()
+                # Discard early estimated download videos and REDOWNLOAD with EXACT audio_duration.
+                # Early estimation often severely underestimates true TTS duration.
+                _ = future_materials.result() # Wait for it to finish to prevent orphaned threads
+                logger.info(f"Re-checking downloaded materials with exact duration: {audio_duration}s")
+                scene_search_terms = [item["term"] for item in video_scene_terms if "term" in item] if video_scene_terms else video_terms
+                hook_term = video_terms[0] if video_terms else None
+                if hook_term and scene_search_terms and scene_search_terms[0] != hook_term:
+                    scene_search_terms.insert(0, hook_term)
+                downloaded_videos = get_video_materials(task_id, params, scene_search_terms, audio_duration)
             else:
-                # Local source: process synchronously (needs audio_duration)
                 downloaded_videos = get_video_materials(task_id, params, video_terms, audio_duration)
 
             if not downloaded_videos:
