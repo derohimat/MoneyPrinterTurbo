@@ -983,13 +983,13 @@ def generate_video(
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         ffmpeg_cmd = [
             ffmpeg_exe,
-            "-y", # Overwrite
-            "-i", temp_output_file, # Input Base Video
-            "-vf", vf_string, # Subtitle Filter
-            "-c:v", "libx264", # Video Codec
-            "-b:v", "8000k", # Keep Bitrate
-            "-c:a", "copy", # Just copy the mixed audio
-            output_file # Final Output
+            "-y",
+            "-i", temp_output_file,
+            "-vf", vf_string,
+            "-c:v", video_codec,
+            "-b:v", "8000k",
+            "-c:a", "copy",
+            output_file
         ]
         
         try:
