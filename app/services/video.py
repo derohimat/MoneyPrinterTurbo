@@ -523,7 +523,8 @@ def combine_videos(
             video_duration += clip.duration
             
         except Exception as e:
-            logger.error(f"failed to process clip: {str(e)}")
+            import traceback
+            logger.error(f"failed to process clip: {str(e)}\n{traceback.format_exc()}")
     
     # loop processed clips until the video duration matches or exceeds the audio duration.
     if video_duration < audio_duration:
