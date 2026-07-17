@@ -167,6 +167,15 @@ class FileState(BaseState):
     def get_task(self, task_id: str):
         return self._tasks.get(task_id, None)
 
+    def patch_task(self, task_id: str, **kwargs) -> bool:
+        import copy
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        task.update(copy.deepcopy(kwargs))
+        self._save()
+        return True
+
     def delete_task(self, task_id: str):
         if task_id in self._tasks:
             del self._tasks[task_id]

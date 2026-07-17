@@ -1565,15 +1565,6 @@ def generate_video(
             logger=None,
             fps=fps,
         )
-                    afx.MultiplyVolume(params.bgm_volume),
-                    afx.AudioFadeIn(2),
-                    afx.AudioFadeOut(3),
-                ]
-<<<<<<< HEAD
-            )
-            audio_source.append(bgm_clip)
-        except Exception as e:
-            logger.error(f"failed to add bgm: {str(e)}")
 
     # Composite audio
     try:
@@ -1710,43 +1701,7 @@ def generate_video(
     )
     video_clip.close()
     del video_clip
-=======
-                # 服务内解析的随机/自定义音乐可能比成片短，需要循环铺满；任务层
-                # 通过 override 传入的文件表示提供商已经完成时长适配。这里依据
-                # 文件来源决定是否循环，避免今后每增加一个提供商都修改名称白名单。
-                if bgm_file_override is None:
-                    bgm_effects.append(afx.AudioLoop(duration=video_clip.duration))
-                bgm_source_clip = clip_stack.enter_context(AudioFileClip(bgm_file))
-                bgm_clip = bgm_source_clip.with_effects(bgm_effects)
-                audio_clip = CompositeAudioClip([audio_clip, bgm_clip])
-            except Exception:
-                bgm_mix_succeeded = False
-                # 记录完整堆栈和稳定上下文，便于区分文件解码、MoviePy 特效和
-                # CompositeAudioClip 失败；文件内容与 API Key 不会进入日志。
-                logger.exception(
-                    f"failed to mix background music: type={params.bgm_type}, "
-                    f"file={bgm_file}"
-                )
 
-        final_video_clip = video_clip.with_audio(audio_clip)
-        clip_stack.callback(final_video_clip.close)
-        # 显式沿用输入音频的采样率；如果取不到，再回退 MoviePy 默认的 44100Hz。
-        # 这样可以减少不同环境，尤其 Docker 中再次重采样带来的音质波动。
-        output_audio_fps = int(getattr(audio_clip, "fps", 0) or 44100)
-        _write_videofile_with_codec_fallback(
-            final_video_clip,
-            output_file=output_file,
-            codec=_get_configured_video_codec(),
-            audio_codec=audio_codec,
-            audio_fps=output_audio_fps,
-            audio_bitrate=audio_bitrate,
-            temp_audiofile_path=_get_temp_audio_dir(output_dir),
-            threads=params.n_threads or 2,
-            logger=None,
-            fps=fps,
-        )
-        return bgm_mix_succeeded
->>>>>>> upstream/main
 
     # Step 2: Burn in ASS Subtitles using native FFmpeg (blazingly fast, solves WinError 32)
     ass_subtitle_path = subtitle_path.replace(".srt", ".ass") if subtitle_path else None
@@ -1803,6 +1758,7 @@ def generate_video(
              os.remove(output_file)
         os.rename(temp_output_file, output_file)
         logger.info(f"No valid ASS subtitle found, video saved without text overlay.")
+    return True
 
 
 def preprocess_video(materials: List[MaterialInfo], clip_duration=4):

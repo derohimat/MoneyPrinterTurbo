@@ -223,7 +223,6 @@ def _mark_task_failed(task_id: str, stage: str, error: str) -> dict:
         error=failure["error"],
     )
     return failure
->>>>>>> upstream/main
 
 
 def generate_script(task_id, params):
@@ -850,23 +849,7 @@ def generate_final_videos(
     return final_video_paths, combined_video_paths, warnings
 
 
-<<<<<<< HEAD
-def start(task_id, params: VideoParams, stop_at: str = "video"):
-    import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    logger.info(f"start task: {task_id}, stop_at: {stop_at}")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # PHASE 0: PRE-FLIGHT VALIDATION
-    # Consolidate ALL negative terms BEFORE any LLM calls so they can influence
-    # the prompt and we fail fast if config is missing.
-    # ─────────────────────────────────────────────────────────────────────────
-
-    # 0a. Normalize params
-    if type(params.video_concat_mode) is str:
-        params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
-=======
 def _patch_cross_post_state(task_id: str, **kwargs) -> bool | None:
     """安全更新发布字段；短暂状态后端故障时有限重试。"""
     for attempt in range(1, _CROSS_POST_STATE_WRITE_ATTEMPTS + 1):
@@ -1212,7 +1195,12 @@ def _run_pipeline(task_id, params: VideoParams, stop_at: str = "video"):
             "preflight",
             "Sonilo background music requires an API key",
         )
->>>>>>> upstream/main
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if type(params.video_concat_mode) is str:
+        params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 0b. Consolidate negative terms: safety + faceless
     if not params.video_negative_terms:
