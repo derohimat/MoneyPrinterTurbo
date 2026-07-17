@@ -378,6 +378,12 @@ def correct(subtitle_file, video_script, audio_duration: float = 0.0):
 
 
 def srt_to_ass(srt_file: str, ass_file: str, params: dict = None):
+    """Convert SRT to ASS with MrBeast/IShowSpeed-style subtitles.
+    
+    Style: Only 2-3 words visible at a time, centered on screen,
+    active word highlighted in gold with subtle scale-up.
+    Professional, clean, non-intrusive.
+    """
     if not os.path.exists(srt_file):
         logger.error(f"SRT file not found: {srt_file}")
         return False
@@ -385,22 +391,28 @@ def srt_to_ass(srt_file: str, ass_file: str, params: dict = None):
     if params is None:
         params = {}
 
-    font_name = params.get("font_name", "Arial")
-    font_size = int(params.get("font_size", 60))
-    primary_color = "&HFFFFFF&"
-    highlight_color = "&H00FFFF&" # Yellow/Gold
-    stroke_color = "&H000000&"
-    stroke_width = int(params.get("stroke_width", 3))
+    # --- MrBeast/IShowSpeed Professional Subtitle Design ---
+    font_size = 48                       # Readable but compact for 1080x1920 PlayRes
+    primary_color = "&HFFFFFF&"          # White
+    highlight_color = "&H00D7FF&"        # Gold (#FFD700 in ASS BGR)
+    stroke_color = "&H000000&"           # Black outline
+    shadow_color = "&H80000000"          # Semi-transparent black shadow
+    stroke_width = 3                     # Clean thick outline for readability
+    shadow_depth = 2                     # Subtle drop shadow
+    margin_v = 320                       # Position ~1/6 from bottom
+    words_per_chunk = 3                  # Max words shown at once
 
     ass_content = [
         "[Script Info]",
         "ScriptType: v4.00+",
-        "WrapStyle: 1",
+        "WrapStyle: 0",
         "ScaledBorderAndShadow: yes",
+        "PlayResX: 1080",
+        "PlayResY: 1920",
         "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,STHeitiMedium.ttc,{font_size},{primary_color},&H000000FF,{stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{stroke_width},0,2,10,10,60,1",
+        f"Style: Default,STHeitiMedium.ttc,{font_size},{primary_color},&H000000FF,{stroke_color},{shadow_color},-1,0,0,0,100,100,2,0,1,{stroke_width},{shadow_depth},2,60,60,{margin_v},1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
@@ -425,6 +437,7 @@ def srt_to_ass(srt_file: str, ass_file: str, params: dict = None):
         from app.services.subtitle import file_to_subtitles
         items = file_to_subtitles(srt_file)
         dialogues = []
+        
         for index, time_range, text in items:
             times = time_range.split(" --> ")
             if len(times) != 2: continue
@@ -435,30 +448,43 @@ def srt_to_ass(srt_file: str, ass_file: str, params: dict = None):
             text = unescape(text).strip()
             if not text: continue
             
-            # Words might have newlines, clean them up for Hormozi style
             words = text.replace("\n", " ").split()
             if not words: continue
             
             total_chars = sum(len(w) for w in words)
             total_time = end_ms - start_ms
             
+            # Calculate per-word timing
+            word_timings = []
             current_ms = start_ms
-            for i, active_word in enumerate(words):
-                word_duration = int(total_time * (len(active_word) / total_chars)) if total_chars > 0 else total_time // len(words)
-                word_end_ms = current_ms + word_duration
+            for w in words:
+                word_dur = int(total_time * (len(w) / total_chars)) if total_chars > 0 else total_time // len(words)
+                word_timings.append((current_ms, current_ms + word_dur, w))
+                current_ms += word_dur
+            
+            # Split words into chunks of 2-3 words
+            for chunk_start_idx in range(0, len(words), words_per_chunk):
+                chunk_end_idx = min(chunk_start_idx + words_per_chunk, len(words))
+                chunk_words = words[chunk_start_idx:chunk_end_idx]
+                chunk_timings = word_timings[chunk_start_idx:chunk_end_idx]
                 
-                line_words = []
-                for j, w in enumerate(words):
-                    if j == i:
-                        # Hormozi style: yellow and larger font scale
-                        line_words.append(f"{{\\c{highlight_color}\\fscx115\\fscy115}}{w}{{\\c{primary_color}\\fscx100\\fscy100}}")
-                    else:
-                        line_words.append(w)
-                
-                colored_text = " ".join(line_words)
-                dialogue = f"Dialogue: 0,{to_ass_time(current_ms)},{to_ass_time(word_end_ms)},Default,,0,0,0,,{colored_text}"
-                dialogues.append(dialogue)
-                current_ms = word_end_ms
+                # For each word in this chunk, create a dialogue showing 
+                # ONLY the chunk words with the active word highlighted
+                for word_idx_in_chunk, (w_start, w_end, w_text) in enumerate(chunk_timings):
+                    line_parts = []
+                    for j, cw in enumerate(chunk_words):
+                        if j == word_idx_in_chunk:
+                            # Active word: gold + 110% scale
+                            line_parts.append(
+                                f"{{\\c{highlight_color}\\fscx110\\fscy110}}{cw}"
+                                f"{{\\c{primary_color}\\fscx100\\fscy100}}"
+                            )
+                        else:
+                            line_parts.append(cw)
+                    
+                    display_text = " ".join(line_parts)
+                    dialogue = f"Dialogue: 0,{to_ass_time(w_start)},{to_ass_time(w_end)},Default,,0,0,0,,{display_text}"
+                    dialogues.append(dialogue)
 
         ass_content.extend(dialogues)
         with open(ass_file, "w", encoding="utf-8") as file:
@@ -467,86 +493,6 @@ def srt_to_ass(srt_file: str, ass_file: str, params: dict = None):
     except Exception as e:
         logger.error(f"failed to convert srt to ass: {str(e)}")
         return False
-
-
-    if params is None:
-        params = {}
-
-    font_name = params.get("font_name", "Arial")
-    font_size = int(params.get("font_size", 60))
-    # ASS colors are in BGR format &HBBGGRR&
-    primary_color = "&HFFFFFF&"  # White
-    highlight_color = "&H00FFFF&"  # Yellow/Gold for dynamic keywords
-    stroke_color = "&H000000&"  # Black outline
-    stroke_width = int(params.get("stroke_width", 3))
-
-    # ASS Header
-    ass_content = [
-        "[Script Info]",
-        "ScriptType: v4.00+",
-        "WrapStyle: 1",
-        "ScaledBorderAndShadow: yes",
-        "",
-        "[V4+ Styles]",
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,STHeitiMedium.ttc,{font_size},{primary_color},&H000000FF,{stroke_color},&H80000000,-1,0,0,0,100,100,0,0,1,{stroke_width},0,2,10,10,60,1",  # Alignment 2 is Bottom Center
-        "",
-        "[Events]",
-        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
-    ]
-
-    def format_ass_time(srt_time):
-        # Convert SRT time (00:00:01,500) to ASS time (0:00:01.50)
-        # srt_time is 'H:M:S,ms'
-        h, m, remaining = srt_time.split(":")
-        s, ms = remaining.split(",")
-        # Ensure H is single digit if < 10 for ASS (though 00: is usually fine, H: is standard)
-        h = str(int(h))
-        # ASS needs centiseconds (2 digits)
-        cs = ms[:2]
-        return f"{h}:{m}:{s}.{cs}"
-
-    def apply_dynamic_coloring(line_text):
-        words = line_text.split()
-        colored_words = []
-        for word in words:
-            # Simple heuristic: Highlight words >= 4 chars
-            clean_word = re.sub(r'[^\w\s]', '', word)
-            if len(clean_word) >= 4:
-                colored_words.append(f"{{\\c{highlight_color}}}{word}{{\\c{primary_color}}}")
-            else:
-                colored_words.append(word)
-        return " ".join(colored_words)
-
-    try:
-        items = file_to_subtitles(srt_file)
-        dialogues = []
-        for index, time_range, text in items:
-            times = time_range.split(" --> ")
-            if len(times) != 2:
-                continue
-            
-            start_time = format_ass_time(times[0].strip())
-            end_time = format_ass_time(times[1].strip())
-            
-            text = unescape(text).strip()
-            if not text:
-                continue
-                
-            # Replace newlines with ASS newline
-            text = text.replace("\n", "\\N")
-            
-            # Apply color highlights
-            colored_text = apply_dynamic_coloring(text)
-            
-            # Dialogue: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-            dialogue = f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{colored_text}"
-            dialogues.append(dialogue)
-            
-        ass_content.extend(dialogues)
-
-        with open(ass_file, "w", encoding="utf-8") as file:
-            file.write("\n".join(ass_content) + "\n")
             
         logger.info(f"completed, ASS subtitle file created from SRT: {ass_file}")
         return True
