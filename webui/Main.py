@@ -39,7 +39,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import bgm as bgm_service
-from app.services import cache_manager, llm, video, voice
+from app.services import cache_manager, llm, video, voice, webui_task
 from app.services import sonilo as sonilo_service
 from app.services import state as sm
 from app.services import task as tm
@@ -252,10 +252,11 @@ def _initialize_session_state():
         "ui_language": initial_ui_language,
         # 已落盘的本地素材允许用户只修改文案后继续复用。
         "local_video_materials": [],
-        # 控件交互会触发 rerun，日志必须保存在会话中才能持续显示。
-        "generation_log_records": [],
         # 生成按钮回调先登记任务，使顶部入口能立即显示运行中数量。
         "active_generation_tasks": {},
+        # 最近一次从当前页面提交的任务。生成改为后台执行后，页面 Fragment
+        # 通过这个 ID 查询状态；刷新时不再依赖正在执行的旧页面脚本。
+        "current_generation_task_id": "",
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -553,7 +554,12 @@ def _collect_task_summaries(limit=20):
 
     for task_id, active_task in _active_generation_tasks().items():
         history_task = history_tasks.get(task_id, {})
-        if history_task and _task_state_filter_key(history_task) == "complete":
+        if history_task and _task_state_filter_key(history_task) in {
+            "complete",
+            "failed",
+        }:
+            # 会话中的 active 标记只负责覆盖任务刚提交到状态存储前的极短窗口。
+            # 后台任务结束后必须以真实终态为准，不能把失败任务重新显示为生成中。
             continue
 
         task_path = os.path.join(utils.task_dir(), task_id)
@@ -1326,28 +1332,123 @@ def render_onboarding_tour():
         tour.start()
 
 
-def render_generation_logs(container):
+def _render_generation_logs(task_id):
+    """渲染后台任务日志快照，不从工作线程访问 Streamlit 会话状态。"""
     if config.ui.get("hide_log", False):
-        container.empty()
         return
 
-    log_records = st.session_state.get("generation_log_records", [])
+    log_records = webui_task.get_task_logs(task_id)
     if not log_records:
-        container.empty()
         return
 
-    with container:
-        st.code("\n".join(log_records))
+    st.code("\n".join(log_records))
 
 
-def remove_logger_handler_safely(handler_id):
+def _render_generation_task_snapshot(task_id, task):
+    """根据状态存储中的快照渲染进度、失败原因或最终成片。"""
+    if not task:
+        st.info(tr("Generating Video"))
+        _render_generation_logs(task_id)
+        return
+
+    state = _normalize_task_state(task.get("state"))
+    progress = max(0, min(100, int(task.get("progress", 0) or 0)))
+    if state == const.TASK_STATE_PROCESSING:
+        st.info(tr("Generating Video"))
+        st.progress(
+            progress,
+            text=f"{tr('Task Progress')}: {progress}%",
+        )
+        _render_generation_logs(task_id)
+        return
+
+    if state == const.TASK_STATE_FAILED:
+        error = str(task.get("error") or "").strip()
+        message = tr("Video Generation Failed")
+        st.error(f"{message}: {error}" if error else message)
+        _render_generation_logs(task_id)
+        return
+
+    video_files = task.get("videos") or []
+    if state != const.TASK_STATE_COMPLETE or not video_files:
+        st.error(tr("Video Generation Failed"))
+        _render_generation_logs(task_id)
+        return
+
+    st.success(tr("Video Generation Completed"))
+    for warning in task.get("warnings") or []:
+        if isinstance(warning, Mapping) and warning.get("code") == "sonilo_bgm_failed":
+            st.warning(
+                tr("Sonilo BGM Fallback Warning").format(
+                    index=warning.get("video_index", "")
+                )
+            )
+        else:
+            st.warning(str(warning))
+
     try:
-        logger.remove(handler_id)
-    except ValueError:
-        # Streamlit 交互可能触发 rerun，Loguru handler 在 finally 执行前
-        # 已经被其它初始化流程移除。这里忽略缺失 handler，避免生成成功后
-        # 因清理日志监听器失败而把页面打成异常。
-        logger.debug(f"log handler already removed: {handler_id}")
+        player_cols = st.columns(len(video_files) * 2 + 1)
+        for i, url in enumerate(video_files):
+            player_cols[i * 2 + 1].video(url)
+    except Exception as exc:
+        logger.exception(
+            f"failed to render generated video preview: task_id={task_id}, "
+            f"video_files={video_files}, error={exc}"
+        )
+
+    _render_generation_logs(task_id)
+    if st.session_state.get("opened_generation_task_id") != task_id:
+        # 原同步流程会在生成完成后自动打开任务目录。Fragment 可能重复运行，
+        # 因此用会话标记保证每个任务只打开一次，避免连续弹出 Finder/资源管理器。
+        st.session_state["opened_generation_task_id"] = task_id
+        open_task_folder(task_id)
+        logger.info(f"{tr('Video Generation Completed')}: task_id={task_id}")
+
+
+@st.fragment(run_every="2s")
+def _render_running_generation_task(task_id):
+    """只在任务运行期间轮询；结束后切回静态结果，停止不必要的定时刷新。"""
+    try:
+        task = sm.state.get_task(task_id)
+    except Exception as exc:
+        logger.exception(
+            f"failed to query WebUI generation task: task_id={task_id}, error={exc}"
+        )
+        st.error(tr("Video Generation Failed"))
+        return
+
+    state = _normalize_task_state((task or {}).get("state"))
+    if state in {const.TASK_STATE_COMPLETE, const.TASK_STATE_FAILED}:
+        _remove_active_generation_task(task_id)
+        # 完整页面脚本现在没有耗时生成逻辑，可以安全 rerun 并把结果改为静态
+        # 渲染。这样任务结束后不会让浏览器永久保留一个两秒轮询的 Fragment。
+        st.rerun(scope="app")
+
+    _render_generation_task_snapshot(task_id, task)
+
+
+def _render_current_generation_task():
+    """在生成按钮下方恢复当前页面最近提交任务的可查询 UI。"""
+    task_id = st.session_state.get("current_generation_task_id", "")
+    if not task_id:
+        return
+
+    try:
+        task = sm.state.get_task(task_id)
+    except Exception as exc:
+        logger.exception(
+            f"failed to query current WebUI task: task_id={task_id}, error={exc}"
+        )
+        st.error(tr("Video Generation Failed"))
+        return
+
+    state = _normalize_task_state((task or {}).get("state"))
+    if state in {const.TASK_STATE_COMPLETE, const.TASK_STATE_FAILED}:
+        _remove_active_generation_task(task_id)
+        _render_generation_task_snapshot(task_id, task)
+        return
+
+    _render_running_generation_task(task_id)
 
 
 def get_llm_provider_tips(provider_id, **kwargs):
@@ -3239,9 +3340,7 @@ def _render_generation_controls(
         on_click=_prepare_generation_task,
     )
     render_onboarding_tour()
-    log_container = st.empty()
     if start_button:
-        st.session_state["generation_log_records"] = []
         config.save_config()
         task_id = st.session_state.get("pending_generation_task_id") or str(uuid4())
         _add_active_generation_task(
@@ -3396,62 +3495,24 @@ def _render_generation_controls(
                 if m.url:
                     params.video_materials.append(m)
 
-        def log_received(msg):
-            if config.ui["hide_log"]:
-                return
-            records = st.session_state.setdefault("generation_log_records", [])
-            records.append(str(msg).rstrip())
-            # 日志用于 WebUI 诊断，不需要无限增长；限制数量避免长任务反复
-            # rerun 后页面负担过重。
-            if len(records) > 1000:
-                del records[:-1000]
-            render_generation_logs(log_container)
-
-        log_handler_id = logger.add(log_received)
         try:
             st.toast(tr("Generating Video"))
             logger.info(tr("Start Generating Video"))
             logger.info(utils.to_json(params))
-
-            with config.runtime_config_lock():
-                result = tm.start(task_id=task_id, params=params)
-            if not result or "videos" not in result:
-                st.error(tr("Video Generation Failed"))
-                logger.error(tr("Video Generation Failed"))
-                st.stop()
-
-            video_files = result.get("videos", [])
-            st.success(tr("Video Generation Completed"))
-            for warning in result.get("warnings") or []:
-                if (
-                    isinstance(warning, Mapping)
-                    and warning.get("code") == "sonilo_bgm_failed"
-                ):
-                    st.warning(
-                        tr("Sonilo BGM Fallback Warning").format(
-                            index=warning.get("video_index", "")
-                        )
-                    )
-                else:
-                    st.warning(str(warning))
-            try:
-                if video_files:
-                    player_cols = st.columns(len(video_files) * 2 + 1)
-                    for i, url in enumerate(video_files):
-                        player_cols[i * 2 + 1].video(url)
-            except Exception as e:
-                logger.exception(
-                    f"failed to render generated video preview: task_id={task_id}, "
-                    f"video_files={video_files}, error={e}"
-                )
-
-            open_task_folder(task_id)
-            logger.info(tr("Video Generation Completed"))
-        finally:
+            webui_task.submit_generation(
+                task_id=task_id,
+                params=params,
+                capture_logs=not config.ui.get("hide_log", False),
+            )
+        except Exception:
             _remove_active_generation_task(task_id)
-            remove_logger_handler_safely(log_handler_id)
+            st.error(tr("Video Generation Failed"))
+            st.stop()
 
-    render_generation_logs(log_container)
+        st.session_state["current_generation_task_id"] = task_id
+        logger.info(f"WebUI generation task submitted: task_id={task_id}")
+
+    _render_current_generation_task()
 
 
 def _render_application():
