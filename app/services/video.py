@@ -698,13 +698,7 @@ def combine_videos(
     
     # T4-1: Init Pattern Interrupt state
     last_interrupt_time = 0.0
-    available_effects = [
-        video_effects.screen_shake,
-        video_effects.flash_effect,
-        video_effects.chromatic_aberration,
-        video_effects.glitch_effect,
-        video_effects.zoom_burst,
-    ]
+    available_effects = []
     
     # T4-2: Pacing Curve (Chop on Demand)
     # Instead of pre-chopping, we Select -> Chop -> Add based on current timeline position.
@@ -863,7 +857,7 @@ def combine_videos(
             if apply_ken_burns:
                 # Apply to static images or clips where we want dynamic motion
                 # Since we don't know if source is static, we apply subtly to add production value
-                clip = video_effects.ken_burns_effect(clip, zoom_factor=1.1, pan_direction="random")
+                clip = video_effects.zoomin_transition(clip, 0)
 
             shuffle_side = random.choice(["left", "right", "top", "bottom"])
             if not video_transition_mode or video_transition_mode.value == VideoTransitionMode.none.value:
@@ -879,24 +873,24 @@ def combine_videos(
                 elif transition_val == VideoTransitionMode.slide_out.value:
                     clip = video_effects.slideout_transition(clip, transition_speed, shuffle_side)
                 elif transition_val == VideoTransitionMode.whip_pan.value:
-                    clip = video_effects.whip_pan_transition(clip, transition_speed)
+                    clip = video_effects.slidein_transition(clip, transition_speed, shuffle_side)
                 elif transition_val == VideoTransitionMode.zoom.value:
-                    clip = video_effects.zoom_transition(clip, transition_speed)
+                    clip = video_effects.zoomin_transition(clip, transition_speed)
                 elif transition_val == VideoTransitionMode.shuffle.value:
                     transition_funcs = [
                         lambda c: video_effects.fadein_transition(c, transition_speed),
                         lambda c: video_effects.fadeout_transition(c, transition_speed),
                         lambda c: video_effects.slidein_transition(c, transition_speed, shuffle_side),
                         lambda c: video_effects.slideout_transition(c, transition_speed, shuffle_side),
-                        lambda c: video_effects.whip_pan_transition(c, transition_speed),
-                        lambda c: video_effects.zoom_transition(c, transition_speed),
+                        lambda c: video_effects.zoomin_transition(c, transition_speed),
+                        lambda c: video_effects.zoomout_transition(c, transition_speed),
                     ]
                     shuffle_transition = random.choice(transition_funcs)
                     clip = shuffle_transition(clip)
 
             # T4-1: Pattern Interrupts
             # Check if we should apply effect (every 5-8s)
-            if enable_pattern_interrupts: # Changed from params.enable_pattern_interrupts
+            if enable_pattern_interrupts and available_effects: # Changed from params.enable_pattern_interrupts
                 # video_duration is current start time
                 interval = random.uniform(5.0, 8.0)
                 if (video_duration - last_interrupt_time) > interval:
@@ -1373,7 +1367,6 @@ def generate_video(
                         color=params.text_fore_color
                     )
                     counter_clip = counter_clip.with_position("center").with_start(num['start'])
-                    counter_clip = counter_clip.with_effects([vfx.CrossFadeIn(0.2), vfx.CrossFadeOut(0.2)])
                     overlay_clips.append(counter_clip)
             except Exception as e:
                 logger.error(f"failed to add number counters: {e}")
@@ -1390,7 +1383,6 @@ def generate_video(
                      fill_color=params.text_fore_color
                  )
                  if bar_clip:
-                     bar_clip = bar_clip.with_effects([vfx.CrossFadeIn(0.5), vfx.CrossFadeOut(0.5)])
                      overlay_clips.append(bar_clip)
             except Exception as e:
                 logger.error(f"failed to add progress bar: {e}")
@@ -1453,7 +1445,7 @@ def generate_video(
                 font=wm_font,
                 font_size=max(24, int(params.font_size * 0.4)),
                 color="#FFFFFF",
-            ).with_effects([vfx.CrossFadeIn(0)])
+            )
             watermark_clip = watermark_clip.with_duration(video_clip.duration)
             watermark_clip = watermark_clip.with_opacity(params.watermark_opacity)
         elif params.watermark_image and os.path.exists(params.watermark_image):
@@ -1514,10 +1506,7 @@ def generate_video(
                 
                 if hasattr(video_effects, "zoom_burst"):
                     hook_clip = video_effects.zoom_burst(hook_clip, duration=0.8, zoom_to=1.15)
-                else:
-                    hook_clip = video_effects.pop_in_effect(hook_clip, duration=0.5)
                     
-                hook_clip = hook_clip.with_effects([vfx.CrossFadeOut(0.5)])
                 overlay_clips.append(hook_clip)
                 logger.info(f"  ⑦ hook ('burn' styled, {hook_duration:.1f}s): {hook_text}")
         except Exception as e:
@@ -1538,7 +1527,6 @@ def generate_video(
                 cta_start = max(0, video_clip.duration - 3)
                 cta_clip = cta_clip.with_start(cta_start).with_duration(3)
                 cta_clip = cta_clip.with_position(("center", video_height * 0.85))
-                cta_clip = cta_clip.with_effects([vfx.CrossFadeIn(0.3)])
                 overlay_clips.append(cta_clip)
                 logger.info(f"  ⑧ CTA: {cta_text}")
         except Exception as e:
@@ -1566,141 +1554,7 @@ def generate_video(
             fps=fps,
         )
 
-    # Composite audio
-    try:
-        final_audio = CompositeAudioClip(audio_source)
-        final_audio = final_audio.with_duration(video_clip.duration)
-        video_clip = video_clip.with_audio(final_audio)
-    except Exception as e:
-        logger.error(f"failed to composite audio: {str(e)}")
-        # Fallback to just voice if mix fails
-        video_clip = video_clip.with_audio(audio_clip)
 
-    # Watermark overlay
-    watermark_clip = None
-    if params.watermark_text:
-        logger.info(f"  ⑥ watermark text: {params.watermark_text}")
-        wm_font = font_path if font_path else "Arial"
-        watermark_clip = TextClip(
-            text=params.watermark_text,
-            font=wm_font,
-            font_size=max(24, int(params.font_size * 0.4)),
-            color="#FFFFFF",
-        ).with_effects([vfx.CrossFadeIn(0)])
-        watermark_clip = watermark_clip.with_duration(video_clip.duration)
-        watermark_clip = watermark_clip.with_opacity(params.watermark_opacity)
-    elif params.watermark_image and os.path.exists(params.watermark_image):
-        logger.info(f"  ⑥ watermark image: {params.watermark_image}")
-        watermark_clip = ImageClip(params.watermark_image)
-        # Scale watermark to max 15% of video width
-        wm_scale = (video_width * 0.15) / watermark_clip.w
-        watermark_clip = watermark_clip.resized(wm_scale)
-        watermark_clip = watermark_clip.with_duration(video_clip.duration)
-        watermark_clip = watermark_clip.with_opacity(params.watermark_opacity)
-
-    if watermark_clip:
-        margin = 20
-        pos = params.watermark_position or "bottom_right"
-        if pos == "top_left":
-            wm_pos = (margin, margin)
-        elif pos == "top_right":
-            wm_pos = (video_width - watermark_clip.w - margin, margin)
-        elif pos == "bottom_left":
-            wm_pos = (margin, video_height - watermark_clip.h - margin)
-        elif pos == "center":
-            wm_pos = ("center", "center")
-        else:  # bottom_right (default)
-            wm_pos = (video_width - watermark_clip.w - margin, video_height - watermark_clip.h - margin)
-
-        watermark_clip = watermark_clip.with_position(wm_pos)
-        video_clip = CompositeVideoClip([video_clip, watermark_clip])
-
-    # Hook text overlay (dynamic duration and 'burn' styling)
-    # Re-initialize overlay_clips with the fully composited video_clip (which now contains subtitles and base overlays)
-    overlay_clips = [video_clip]
-    try:
-        hook_text = getattr(params, "hook_text", "")
-        # Fallback if not generated earlier
-        if not hook_text and getattr(params, "enable_hook", False):
-            hook_text = hook_generator.get_hook_text(
-                category=params.video_subject, 
-                subject=params.video_subject,
-                auto_optimize=getattr(params, "auto_optimize", True)
-            )
-            
-        if hook_text:
-            hook_duration = getattr(params, "hook_duration", 3.0)
-            hook_font = font_path if font_path else "Arial"
-            
-            # [FIX] Refine hook aesthetics: smaller font, more padding (narrower width), and better spacing (interline)
-            hook_width = int(video_width * 0.7) # 70% of screen width for 'padding' effect
-            hook_clip = TextClip(
-                text=hook_text,
-                font=hook_font,
-                font_size=min(70, max(40, int(params.font_size * 1.1))), # Reduced from 120/1.5x to 70/1.1x
-                color="#FFFF00", # Yellow
-                stroke_color="#000000", # Black stroke for better contrast
-                stroke_width=2,
-                method="caption",
-                size=(hook_width, None),
-                horizontal_align="center",
-                vertical_align="center",
-                interline=10 # Added spacing between lines to prevent overlap
-            )
-            hook_clip = hook_clip.with_start(0).with_duration(hook_duration)
-            hook_clip = hook_clip.with_position(("center", "center"))
-            
-            # Apply 'Burn' / dramatic pop-in zoom effect
-            if hasattr(video_effects, "zoom_burst"):
-                hook_clip = video_effects.zoom_burst(hook_clip, duration=0.8, zoom_to=1.15)
-            else:
-                hook_clip = video_effects.pop_in_effect(hook_clip, duration=0.5)
-                
-            hook_clip = hook_clip.with_effects([vfx.CrossFadeOut(0.5)])
-            overlay_clips.append(hook_clip)
-            logger.info(f"  ⑦ hook ('burn' styled, {hook_duration:.1f}s): {hook_text}")
-    except Exception as e:
-        logger.warning(f"Hook overlay failed (non-critical): {str(e)}")
-
-    # CTA end screen (last 3 seconds)
-    try:
-        cta_text = hook_generator.get_cta_text()
-        if cta_text and video_clip.duration > 5:
-            cta_font = font_path if font_path else "Arial"
-            cta_clip = TextClip(
-                text=cta_text,
-                font=cta_font,
-                font_size=max(32, int(params.font_size * 0.55)),
-                color="#FFD700",
-                stroke_color="#000000",
-                stroke_width=2,
-            )
-            cta_start = max(0, video_clip.duration - 3)
-            cta_clip = cta_clip.with_start(cta_start).with_duration(3)
-            cta_clip = cta_clip.with_position(("center", video_height * 0.85))
-            cta_clip = cta_clip.with_effects([vfx.CrossFadeIn(0.3)])
-            overlay_clips.append(cta_clip)
-            logger.info(f"  ⑧ CTA: {cta_text}")
-    except Exception as e:
-        logger.warning(f"CTA overlay failed (non-critical): {str(e)}")
-
-    if len(overlay_clips) > 1:
-        video_clip = CompositeVideoClip(overlay_clips)
-
-    # T0-2: bitrate control for base video (no subtitles yet)
-    temp_output_file = output_file.replace(".mp4", "_nosub.mp4")
-    video_clip.write_videofile(
-        temp_output_file,
-        codec=video_codec,
-        audio_codec=audio_codec,
-        temp_audiofile_path=output_dir,
-        threads=params.n_threads or optimal_threads,
-        logger=None,
-        fps=fps,
-        bitrate="8000k",
-    )
-    video_clip.close()
-    del video_clip
 
 
     # Step 2: Burn in ASS Subtitles using native FFmpeg (blazingly fast, solves WinError 32)
@@ -1711,7 +1565,6 @@ def generate_video(
         
         import subprocess
         import shutil
-        import os
 
         # Windows FFmpeg ASS filter path escaping is notoriously difficult.
         # Instead, we copy the ASS file to the output directory and use a relative name.

@@ -283,7 +283,6 @@ def generate_terms(task_id, params, video_script):
             video_subject=params.video_subject,
             video_script=video_script,
             amount=8 if getattr(params, "match_materials_to_script", False) else 5,
-            use_faceless=getattr(params, "use_faceless", False),
             match_script_order=getattr(params, "match_materials_to_script", False),
         )
     else:
@@ -551,9 +550,9 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file, audi
             text=video_script, sub_maker=sub_maker, subtitle_file=subtitle_path
         )
         try:
-            voice.create_ass_subtitle(
-                sub_maker=sub_maker, text=video_script, subtitle_file=ass_subtitle_path, params=params.dict()
-            )
+            if os.path.exists(subtitle_path):
+                from app.services import subtitle
+                subtitle.srt_to_ass(srt_file=subtitle_path, ass_file=ass_subtitle_path, params=params.dict())
         except Exception as e:
             logger.error(f"Failed to generate ASS subtitle: {e}")
             
@@ -672,7 +671,6 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             ),
             audio_duration=remaining_duration * params.video_count if 'remaining_duration' in locals() else audio_duration * params.video_count,
             max_clip_duration=params.video_clip_duration,
-            negative_terms=getattr(params, "video_negative_terms", None),
             match_script_order=getattr(params, "match_materials_to_script", False),
         )
         if not downloaded_videos:
