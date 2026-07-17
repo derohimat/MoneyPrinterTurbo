@@ -1,43 +1,59 @@
 import asyncio
+import base64
+import io
+import inspect
+import json
+import math
 import os
+import queue
 import re
+import subprocess
+import threading
+import time
+import unicodedata
 from datetime import datetime
 from typing import Union
-from xml.sax.saxutils import unescape
+from xml.sax.saxutils import escape, unescape
 
 import edge_tts
 import requests
-# from edge_tts import SubMaker, submaker  <-- Removed
-# from edge_tts.submaker import mktimestamp <-- Removed
+from edge_tts import SubMaker
 from loguru import logger
-
-def mktimestamp(ticks: float) -> str:
-    """
-    Convert 100ns ticks to timestamp format HH:MM:SS.mmm
-    """
-    seconds = ticks / 10_000_000
-    milliseconds = round(seconds * 1000.0)
-    hours = milliseconds // 3600000
-    milliseconds %= 3600000
-    minutes = milliseconds // 60000
-    milliseconds %= 60000
-    seconds = milliseconds // 1000
-    milliseconds %= 1000
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
-
-class SubMaker:
-    def __init__(self):
-        self.subs = []
-        self.offset = []
-
-    def create_sub(self, timestamp, text):
-        # timestamp is (offset, duration) in ticks
-        offset, duration = timestamp
-        self.subs.append(text)
-        self.offset.append((offset, offset + duration))
+from moviepy.video.tools import subtitles
+from moviepy.audio.io.AudioFileClip import AudioFileClip
+from openai import OpenAI
 
 from app.config import config
 from app.utils import utils
+
+_DEFAULT_EDGE_TTS_TIMEOUT_SECONDS = 30.0
+_MIMO_DEFAULT_BASE_URL = "https://api.xiaomimimo.com/v1"
+_MIMO_DEFAULT_TTS_MODEL = "mimo-v2.5-tts"
+NO_VOICE_NAME = "no-voice"
+# `none` 是 PR #981 里曾使用过的无配音标识。这里短期兼容这个值，避免
+# 已经手动调用过该分支的 API 用户升级后立即失效；WebUI 和新代码统一使用
+# 更明确的 `no-voice`。
+_NO_VOICE_ALIASES = {NO_VOICE_NAME, "none"}
+
+
+def _configure_pydub_ffmpeg(audio_segment_cls):
+    configured_ffmpeg = utils.get_ffmpeg_binary()
+    if configured_ffmpeg:
+        audio_segment_cls.converter = configured_ffmpeg
+
+
+def mktimestamp(time_unit: float) -> str:
+    """
+    将 edge_tts 使用的 100 纳秒时间单位转换为字幕时间戳。
+
+    edge_tts 7.x 不再导出旧版本里的 `mktimestamp`，但项目里旧字幕链路
+    还需要这个格式化函数来兼容 Azure v2、Gemini、SiliconFlow 这些
+    手工构造的字幕时间轴，因此这里内置一个等价实现。
+    """
+    hour = math.floor(time_unit / 10**7 / 3600)
+    minute = math.floor((time_unit / 10**7 / 60) % 60)
+    seconds = (time_unit / 10**7) % 60
+    return f"{hour:02d}:{minute:02d}:{seconds:06.3f}"
 
 
 def get_siliconflow_voices() -> list[str]:
@@ -99,1009 +115,97 @@ def get_gemini_voices() -> list[str]:
     ]
 
 
+def get_mimo_voices() -> list[str]:
+    """
+    获取 Xiaomi MiMo V2.5 TTS 的预置音色列表。
+
+    当前只接入官方文档里的 `mimo-v2.5-tts` 预置音色模式。音色设计
+    `mimo-v2.5-tts-voicedesign` 和音色复刻 `mimo-v2.5-tts-voiceclone`
+    需要额外的输入表单和素材上传流程，先不混入普通 TTS 下拉框，避免
+    用户误以为选择一个 voice id 就能完成所有高级能力。
+    """
+    voices_with_gender = [
+        ("mimo_default", "Female"),
+        ("冰糖", "Female"),
+        ("茉莉", "Female"),
+        ("苏打", "Male"),
+        ("白桦", "Male"),
+        ("Mia", "Female"),
+        ("Chloe", "Female"),
+        ("Milo", "Male"),
+        ("Dean", "Male"),
+    ]
+
+    return [f"mimo:{voice}-{gender}" for voice, gender in voices_with_gender]
+
+
+def get_elevenlabs_voices(api_key: str) -> list[str]:
+    if not api_key:
+        return []
+    try:
+        url = "https://api.elevenlabs.io/v2/voices"
+        params = {"is_favorite": "true", "page_size": 100}
+        headers = {"xi-api-key": api_key}
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.warning(
+                f"ElevenLabs voices fetch failed with status {response.status_code}: {response.text}"
+            )
+            return []
+        data = response.json()
+        voices = data.get("voices", [])
+        return [
+            f"elevenlabs:{v['voice_id']}:{v['name']}"
+            for v in voices
+            if v.get("voice_id") and v.get("name") and v.get("status") != "disabled"
+        ]
+    except Exception as e:
+        logger.warning(f"ElevenLabs voices fetch failed: {str(e)}")
+        return []
+
+
+def get_chatterbox_voices() -> list[str]:
+    """Return the configured Chatterbox voices.
+
+    Chatterbox is self-hosted, so there is no global voice catalog. Operators
+    list the voice names exposed by their server via ``[chatterbox] voices``
+    (a TOML array, or a comma-separated string). Each entry is normalised to
+    the ``chatterbox:<name>`` format used by the TTS dispatcher.
+    """
+    voices = config.chatterbox.get("voices", []) or []
+    if isinstance(voices, str):
+        voices = [v.strip() for v in voices.split(",") if v.strip()]
+    result = []
+    for v in voices:
+        v = str(v).strip()
+        if not v:
+            continue
+        result.append(v if v.startswith("chatterbox:") else f"chatterbox:{v}")
+    if not result:
+        # keep the dropdown usable even before any voice is configured
+        result = ["chatterbox:default-Female"]
+    return result
+
+
+_AZURE_VOICES_DATA_FILE = os.path.join(
+    os.path.dirname(__file__), "data", "azure_voices.json"
+)
+_azure_voices_cache = None
+
+
+def _load_azure_voices() -> list[dict]:
+    global _azure_voices_cache
+    if _azure_voices_cache is None:
+        with open(_AZURE_VOICES_DATA_FILE, "r", encoding="utf-8") as f:
+            _azure_voices_cache = json.load(f)
+    return _azure_voices_cache
+
+
 def get_all_azure_voices(filter_locals=None) -> list[str]:
-    azure_voices_str = """
-Name: af-ZA-AdriNeural
-Gender: Female
-
-Name: af-ZA-WillemNeural
-Gender: Male
-
-Name: am-ET-AmehaNeural
-Gender: Male
-
-Name: am-ET-MekdesNeural
-Gender: Female
-
-Name: ar-AE-FatimaNeural
-Gender: Female
-
-Name: ar-AE-HamdanNeural
-Gender: Male
-
-Name: ar-BH-AliNeural
-Gender: Male
-
-Name: ar-BH-LailaNeural
-Gender: Female
-
-Name: ar-DZ-AminaNeural
-Gender: Female
-
-Name: ar-DZ-IsmaelNeural
-Gender: Male
-
-Name: ar-EG-SalmaNeural
-Gender: Female
-
-Name: ar-EG-ShakirNeural
-Gender: Male
-
-Name: ar-IQ-BasselNeural
-Gender: Male
-
-Name: ar-IQ-RanaNeural
-Gender: Female
-
-Name: ar-JO-SanaNeural
-Gender: Female
-
-Name: ar-JO-TaimNeural
-Gender: Male
-
-Name: ar-KW-FahedNeural
-Gender: Male
-
-Name: ar-KW-NouraNeural
-Gender: Female
-
-Name: ar-LB-LaylaNeural
-Gender: Female
-
-Name: ar-LB-RamiNeural
-Gender: Male
-
-Name: ar-LY-ImanNeural
-Gender: Female
-
-Name: ar-LY-OmarNeural
-Gender: Male
-
-Name: ar-MA-JamalNeural
-Gender: Male
-
-Name: ar-MA-MounaNeural
-Gender: Female
-
-Name: ar-OM-AbdullahNeural
-Gender: Male
-
-Name: ar-OM-AyshaNeural
-Gender: Female
-
-Name: ar-QA-AmalNeural
-Gender: Female
-
-Name: ar-QA-MoazNeural
-Gender: Male
-
-Name: ar-SA-HamedNeural
-Gender: Male
-
-Name: ar-SA-ZariyahNeural
-Gender: Female
-
-Name: ar-SY-AmanyNeural
-Gender: Female
-
-Name: ar-SY-LaithNeural
-Gender: Male
-
-Name: ar-TN-HediNeural
-Gender: Male
-
-Name: ar-TN-ReemNeural
-Gender: Female
-
-Name: ar-YE-MaryamNeural
-Gender: Female
-
-Name: ar-YE-SalehNeural
-Gender: Male
-
-Name: az-AZ-BabekNeural
-Gender: Male
-
-Name: az-AZ-BanuNeural
-Gender: Female
-
-Name: bg-BG-BorislavNeural
-Gender: Male
-
-Name: bg-BG-KalinaNeural
-Gender: Female
-
-Name: bn-BD-NabanitaNeural
-Gender: Female
-
-Name: bn-BD-PradeepNeural
-Gender: Male
-
-Name: bn-IN-BashkarNeural
-Gender: Male
-
-Name: bn-IN-TanishaaNeural
-Gender: Female
-
-Name: bs-BA-GoranNeural
-Gender: Male
-
-Name: bs-BA-VesnaNeural
-Gender: Female
-
-Name: ca-ES-EnricNeural
-Gender: Male
-
-Name: ca-ES-JoanaNeural
-Gender: Female
-
-Name: cs-CZ-AntoninNeural
-Gender: Male
-
-Name: cs-CZ-VlastaNeural
-Gender: Female
-
-Name: cy-GB-AledNeural
-Gender: Male
-
-Name: cy-GB-NiaNeural
-Gender: Female
-
-Name: da-DK-ChristelNeural
-Gender: Female
-
-Name: da-DK-JeppeNeural
-Gender: Male
-
-Name: de-AT-IngridNeural
-Gender: Female
-
-Name: de-AT-JonasNeural
-Gender: Male
-
-Name: de-CH-JanNeural
-Gender: Male
-
-Name: de-CH-LeniNeural
-Gender: Female
-
-Name: de-DE-AmalaNeural
-Gender: Female
-
-Name: de-DE-ConradNeural
-Gender: Male
-
-Name: de-DE-FlorianMultilingualNeural
-Gender: Male
-
-Name: de-DE-KatjaNeural
-Gender: Female
-
-Name: de-DE-KillianNeural
-Gender: Male
-
-Name: de-DE-SeraphinaMultilingualNeural
-Gender: Female
-
-Name: el-GR-AthinaNeural
-Gender: Female
-
-Name: el-GR-NestorasNeural
-Gender: Male
-
-Name: en-AU-NatashaNeural
-Gender: Female
-
-Name: en-AU-WilliamNeural
-Gender: Male
-
-Name: en-CA-ClaraNeural
-Gender: Female
-
-Name: en-CA-LiamNeural
-Gender: Male
-
-Name: en-GB-LibbyNeural
-Gender: Female
-
-Name: en-GB-MaisieNeural
-Gender: Female
-
-Name: en-GB-RyanNeural
-Gender: Male
-
-Name: en-GB-SoniaNeural
-Gender: Female
-
-Name: en-GB-ThomasNeural
-Gender: Male
-
-Name: en-HK-SamNeural
-Gender: Male
-
-Name: en-HK-YanNeural
-Gender: Female
-
-Name: en-IE-ConnorNeural
-Gender: Male
-
-Name: en-IE-EmilyNeural
-Gender: Female
-
-Name: en-IN-NeerjaExpressiveNeural
-Gender: Female
-
-Name: en-IN-NeerjaNeural
-Gender: Female
-
-Name: en-IN-PrabhatNeural
-Gender: Male
-
-Name: en-KE-AsiliaNeural
-Gender: Female
-
-Name: en-KE-ChilembaNeural
-Gender: Male
-
-Name: en-NG-AbeoNeural
-Gender: Male
-
-Name: en-NG-EzinneNeural
-Gender: Female
-
-Name: en-NZ-MitchellNeural
-Gender: Male
-
-Name: en-NZ-MollyNeural
-Gender: Female
-
-Name: en-PH-JamesNeural
-Gender: Male
-
-Name: en-PH-RosaNeural
-Gender: Female
-
-Name: en-SG-LunaNeural
-Gender: Female
-
-Name: en-SG-WayneNeural
-Gender: Male
-
-Name: en-TZ-ElimuNeural
-Gender: Male
-
-Name: en-TZ-ImaniNeural
-Gender: Female
-
-Name: en-US-AnaNeural
-Gender: Female
-
-Name: en-US-AndrewMultilingualNeural
-Gender: Male
-
-Name: en-US-AndrewNeural
-Gender: Male
-
-Name: en-US-AriaNeural
-Gender: Female
-
-Name: en-US-AvaMultilingualNeural
-Gender: Female
-
-Name: en-US-AvaNeural
-Gender: Female
-
-Name: en-US-BrianMultilingualNeural
-Gender: Male
-
-Name: en-US-BrianNeural
-Gender: Male
-
-Name: en-US-ChristopherNeural
-Gender: Male
-
-Name: en-US-EmmaMultilingualNeural
-Gender: Female
-
-Name: en-US-EmmaNeural
-Gender: Female
-
-Name: en-US-EricNeural
-Gender: Male
-
-Name: en-US-GuyNeural
-Gender: Male
-
-Name: en-US-JennyNeural
-Gender: Female
-
-Name: en-US-MichelleNeural
-Gender: Female
-
-Name: en-US-RogerNeural
-Gender: Male
-
-Name: en-US-SteffanNeural
-Gender: Male
-
-Name: en-ZA-LeahNeural
-Gender: Female
-
-Name: en-ZA-LukeNeural
-Gender: Male
-
-Name: es-AR-ElenaNeural
-Gender: Female
-
-Name: es-AR-TomasNeural
-Gender: Male
-
-Name: es-BO-MarceloNeural
-Gender: Male
-
-Name: es-BO-SofiaNeural
-Gender: Female
-
-Name: es-CL-CatalinaNeural
-Gender: Female
-
-Name: es-CL-LorenzoNeural
-Gender: Male
-
-Name: es-CO-GonzaloNeural
-Gender: Male
-
-Name: es-CO-SalomeNeural
-Gender: Female
-
-Name: es-CR-JuanNeural
-Gender: Male
-
-Name: es-CR-MariaNeural
-Gender: Female
-
-Name: es-CU-BelkysNeural
-Gender: Female
-
-Name: es-CU-ManuelNeural
-Gender: Male
-
-Name: es-DO-EmilioNeural
-Gender: Male
-
-Name: es-DO-RamonaNeural
-Gender: Female
-
-Name: es-EC-AndreaNeural
-Gender: Female
-
-Name: es-EC-LuisNeural
-Gender: Male
-
-Name: es-ES-AlvaroNeural
-Gender: Male
-
-Name: es-ES-ElviraNeural
-Gender: Female
-
-Name: es-ES-XimenaNeural
-Gender: Female
-
-Name: es-GQ-JavierNeural
-Gender: Male
-
-Name: es-GQ-TeresaNeural
-Gender: Female
-
-Name: es-GT-AndresNeural
-Gender: Male
-
-Name: es-GT-MartaNeural
-Gender: Female
-
-Name: es-HN-CarlosNeural
-Gender: Male
-
-Name: es-HN-KarlaNeural
-Gender: Female
-
-Name: es-MX-DaliaNeural
-Gender: Female
-
-Name: es-MX-JorgeNeural
-Gender: Male
-
-Name: es-NI-FedericoNeural
-Gender: Male
-
-Name: es-NI-YolandaNeural
-Gender: Female
-
-Name: es-PA-MargaritaNeural
-Gender: Female
-
-Name: es-PA-RobertoNeural
-Gender: Male
-
-Name: es-PE-AlexNeural
-Gender: Male
-
-Name: es-PE-CamilaNeural
-Gender: Female
-
-Name: es-PR-KarinaNeural
-Gender: Female
-
-Name: es-PR-VictorNeural
-Gender: Male
-
-Name: es-PY-MarioNeural
-Gender: Male
-
-Name: es-PY-TaniaNeural
-Gender: Female
-
-Name: es-SV-LorenaNeural
-Gender: Female
-
-Name: es-SV-RodrigoNeural
-Gender: Male
-
-Name: es-US-AlonsoNeural
-Gender: Male
-
-Name: es-US-PalomaNeural
-Gender: Female
-
-Name: es-UY-MateoNeural
-Gender: Male
-
-Name: es-UY-ValentinaNeural
-Gender: Female
-
-Name: es-VE-PaolaNeural
-Gender: Female
-
-Name: es-VE-SebastianNeural
-Gender: Male
-
-Name: et-EE-AnuNeural
-Gender: Female
-
-Name: et-EE-KertNeural
-Gender: Male
-
-Name: fa-IR-DilaraNeural
-Gender: Female
-
-Name: fa-IR-FaridNeural
-Gender: Male
-
-Name: fi-FI-HarriNeural
-Gender: Male
-
-Name: fi-FI-NooraNeural
-Gender: Female
-
-Name: fil-PH-AngeloNeural
-Gender: Male
-
-Name: fil-PH-BlessicaNeural
-Gender: Female
-
-Name: fr-BE-CharlineNeural
-Gender: Female
-
-Name: fr-BE-GerardNeural
-Gender: Male
-
-Name: fr-CA-AntoineNeural
-Gender: Male
-
-Name: fr-CA-JeanNeural
-Gender: Male
-
-Name: fr-CA-SylvieNeural
-Gender: Female
-
-Name: fr-CA-ThierryNeural
-Gender: Male
-
-Name: fr-CH-ArianeNeural
-Gender: Female
-
-Name: fr-CH-FabriceNeural
-Gender: Male
-
-Name: fr-FR-DeniseNeural
-Gender: Female
-
-Name: fr-FR-EloiseNeural
-Gender: Female
-
-Name: fr-FR-HenriNeural
-Gender: Male
-
-Name: fr-FR-RemyMultilingualNeural
-Gender: Male
-
-Name: fr-FR-VivienneMultilingualNeural
-Gender: Female
-
-Name: ga-IE-ColmNeural
-Gender: Male
-
-Name: ga-IE-OrlaNeural
-Gender: Female
-
-Name: gl-ES-RoiNeural
-Gender: Male
-
-Name: gl-ES-SabelaNeural
-Gender: Female
-
-Name: gu-IN-DhwaniNeural
-Gender: Female
-
-Name: gu-IN-NiranjanNeural
-Gender: Male
-
-Name: he-IL-AvriNeural
-Gender: Male
-
-Name: he-IL-HilaNeural
-Gender: Female
-
-Name: hi-IN-MadhurNeural
-Gender: Male
-
-Name: hi-IN-SwaraNeural
-Gender: Female
-
-Name: hr-HR-GabrijelaNeural
-Gender: Female
-
-Name: hr-HR-SreckoNeural
-Gender: Male
-
-Name: hu-HU-NoemiNeural
-Gender: Female
-
-Name: hu-HU-TamasNeural
-Gender: Male
-
-Name: id-ID-ArdiNeural
-Gender: Male
-
-Name: id-ID-GadisNeural
-Gender: Female
-
-Name: is-IS-GudrunNeural
-Gender: Female
-
-Name: is-IS-GunnarNeural
-Gender: Male
-
-Name: it-IT-DiegoNeural
-Gender: Male
-
-Name: it-IT-ElsaNeural
-Gender: Female
-
-Name: it-IT-GiuseppeMultilingualNeural
-Gender: Male
-
-Name: it-IT-IsabellaNeural
-Gender: Female
-
-Name: iu-Cans-CA-SiqiniqNeural
-Gender: Female
-
-Name: iu-Cans-CA-TaqqiqNeural
-Gender: Male
-
-Name: iu-Latn-CA-SiqiniqNeural
-Gender: Female
-
-Name: iu-Latn-CA-TaqqiqNeural
-Gender: Male
-
-Name: ja-JP-KeitaNeural
-Gender: Male
-
-Name: ja-JP-NanamiNeural
-Gender: Female
-
-Name: jv-ID-DimasNeural
-Gender: Male
-
-Name: jv-ID-SitiNeural
-Gender: Female
-
-Name: ka-GE-EkaNeural
-Gender: Female
-
-Name: ka-GE-GiorgiNeural
-Gender: Male
-
-Name: kk-KZ-AigulNeural
-Gender: Female
-
-Name: kk-KZ-DauletNeural
-Gender: Male
-
-Name: km-KH-PisethNeural
-Gender: Male
-
-Name: km-KH-SreymomNeural
-Gender: Female
-
-Name: kn-IN-GaganNeural
-Gender: Male
-
-Name: kn-IN-SapnaNeural
-Gender: Female
-
-Name: ko-KR-HyunsuMultilingualNeural
-Gender: Male
-
-Name: ko-KR-InJoonNeural
-Gender: Male
-
-Name: ko-KR-SunHiNeural
-Gender: Female
-
-Name: lo-LA-ChanthavongNeural
-Gender: Male
-
-Name: lo-LA-KeomanyNeural
-Gender: Female
-
-Name: lt-LT-LeonasNeural
-Gender: Male
-
-Name: lt-LT-OnaNeural
-Gender: Female
-
-Name: lv-LV-EveritaNeural
-Gender: Female
-
-Name: lv-LV-NilsNeural
-Gender: Male
-
-Name: mk-MK-AleksandarNeural
-Gender: Male
-
-Name: mk-MK-MarijaNeural
-Gender: Female
-
-Name: ml-IN-MidhunNeural
-Gender: Male
-
-Name: ml-IN-SobhanaNeural
-Gender: Female
-
-Name: mn-MN-BataaNeural
-Gender: Male
-
-Name: mn-MN-YesuiNeural
-Gender: Female
-
-Name: mr-IN-AarohiNeural
-Gender: Female
-
-Name: mr-IN-ManoharNeural
-Gender: Male
-
-Name: ms-MY-OsmanNeural
-Gender: Male
-
-Name: ms-MY-YasminNeural
-Gender: Female
-
-Name: mt-MT-GraceNeural
-Gender: Female
-
-Name: mt-MT-JosephNeural
-Gender: Male
-
-Name: my-MM-NilarNeural
-Gender: Female
-
-Name: my-MM-ThihaNeural
-Gender: Male
-
-Name: nb-NO-FinnNeural
-Gender: Male
-
-Name: nb-NO-PernilleNeural
-Gender: Female
-
-Name: ne-NP-HemkalaNeural
-Gender: Female
-
-Name: ne-NP-SagarNeural
-Gender: Male
-
-Name: nl-BE-ArnaudNeural
-Gender: Male
-
-Name: nl-BE-DenaNeural
-Gender: Female
-
-Name: nl-NL-ColetteNeural
-Gender: Female
-
-Name: nl-NL-FennaNeural
-Gender: Female
-
-Name: nl-NL-MaartenNeural
-Gender: Male
-
-Name: pl-PL-MarekNeural
-Gender: Male
-
-Name: pl-PL-ZofiaNeural
-Gender: Female
-
-Name: ps-AF-GulNawazNeural
-Gender: Male
-
-Name: ps-AF-LatifaNeural
-Gender: Female
-
-Name: pt-BR-AntonioNeural
-Gender: Male
-
-Name: pt-BR-FranciscaNeural
-Gender: Female
-
-Name: pt-BR-ThalitaMultilingualNeural
-Gender: Female
-
-Name: pt-PT-DuarteNeural
-Gender: Male
-
-Name: pt-PT-RaquelNeural
-Gender: Female
-
-Name: ro-RO-AlinaNeural
-Gender: Female
-
-Name: ro-RO-EmilNeural
-Gender: Male
-
-Name: ru-RU-DmitryNeural
-Gender: Male
-
-Name: ru-RU-SvetlanaNeural
-Gender: Female
-
-Name: si-LK-SameeraNeural
-Gender: Male
-
-Name: si-LK-ThiliniNeural
-Gender: Female
-
-Name: sk-SK-LukasNeural
-Gender: Male
-
-Name: sk-SK-ViktoriaNeural
-Gender: Female
-
-Name: sl-SI-PetraNeural
-Gender: Female
-
-Name: sl-SI-RokNeural
-Gender: Male
-
-Name: so-SO-MuuseNeural
-Gender: Male
-
-Name: so-SO-UbaxNeural
-Gender: Female
-
-Name: sq-AL-AnilaNeural
-Gender: Female
-
-Name: sq-AL-IlirNeural
-Gender: Male
-
-Name: sr-RS-NicholasNeural
-Gender: Male
-
-Name: sr-RS-SophieNeural
-Gender: Female
-
-Name: su-ID-JajangNeural
-Gender: Male
-
-Name: su-ID-TutiNeural
-Gender: Female
-
-Name: sv-SE-MattiasNeural
-Gender: Male
-
-Name: sv-SE-SofieNeural
-Gender: Female
-
-Name: sw-KE-RafikiNeural
-Gender: Male
-
-Name: sw-KE-ZuriNeural
-Gender: Female
-
-Name: sw-TZ-DaudiNeural
-Gender: Male
-
-Name: sw-TZ-RehemaNeural
-Gender: Female
-
-Name: ta-IN-PallaviNeural
-Gender: Female
-
-Name: ta-IN-ValluvarNeural
-Gender: Male
-
-Name: ta-LK-KumarNeural
-Gender: Male
-
-Name: ta-LK-SaranyaNeural
-Gender: Female
-
-Name: ta-MY-KaniNeural
-Gender: Female
-
-Name: ta-MY-SuryaNeural
-Gender: Male
-
-Name: ta-SG-AnbuNeural
-Gender: Male
-
-Name: ta-SG-VenbaNeural
-Gender: Female
-
-Name: te-IN-MohanNeural
-Gender: Male
-
-Name: te-IN-ShrutiNeural
-Gender: Female
-
-Name: th-TH-NiwatNeural
-Gender: Male
-
-Name: th-TH-PremwadeeNeural
-Gender: Female
-
-Name: tr-TR-AhmetNeural
-Gender: Male
-
-Name: tr-TR-EmelNeural
-Gender: Female
-
-Name: uk-UA-OstapNeural
-Gender: Male
-
-Name: uk-UA-PolinaNeural
-Gender: Female
-
-Name: ur-IN-GulNeural
-Gender: Female
-
-Name: ur-IN-SalmanNeural
-Gender: Male
-
-Name: ur-PK-AsadNeural
-Gender: Male
-
-Name: ur-PK-UzmaNeural
-Gender: Female
-
-Name: uz-UZ-MadinaNeural
-Gender: Female
-
-Name: uz-UZ-SardorNeural
-Gender: Male
-
-Name: vi-VN-HoaiMyNeural
-Gender: Female
-
-Name: vi-VN-NamMinhNeural
-Gender: Male
-
-Name: zh-CN-XiaoxiaoNeural
-Gender: Female
-
-Name: zh-CN-XiaoyiNeural
-Gender: Female
-
-Name: zh-CN-YunjianNeural
-Gender: Male
-
-Name: zh-CN-YunxiNeural
-Gender: Male
-
-Name: zh-CN-YunxiaNeural
-Gender: Male
-
-Name: zh-CN-YunyangNeural
-Gender: Male
-
-Name: zh-CN-liaoning-XiaobeiNeural
-Gender: Female
-
-Name: zh-CN-shaanxi-XiaoniNeural
-Gender: Female
-
-Name: zh-HK-HiuGaaiNeural
-Gender: Female
-
-Name: zh-HK-HiuMaanNeural
-Gender: Female
-
-Name: zh-HK-WanLungNeural
-Gender: Male
-
-Name: zh-TW-HsiaoChenNeural
-Gender: Female
-
-Name: zh-TW-HsiaoYuNeural
-Gender: Female
-
-Name: zh-TW-YunJheNeural
-Gender: Male
-
-Name: zu-ZA-ThandoNeural
-Gender: Female
-
-Name: zu-ZA-ThembaNeural
-Gender: Male
-
-
-Name: en-US-AvaMultilingualNeural-V2
-Gender: Female
-
-Name: en-US-AndrewMultilingualNeural-V2
-Gender: Male
-
-Name: en-US-EmmaMultilingualNeural-V2
-Gender: Female
-
-Name: en-US-BrianMultilingualNeural-V2
-Gender: Male
-
-Name: de-DE-FlorianMultilingualNeural-V2
-Gender: Male
-
-Name: de-DE-SeraphinaMultilingualNeural-V2
-Gender: Female
-
-Name: fr-FR-RemyMultilingualNeural-V2
-Gender: Male
-
-Name: fr-FR-VivienneMultilingualNeural-V2
-Gender: Female
-
-Name: zh-CN-XiaoxiaoMultilingualNeural-V2
-Gender: Female
-    """.strip()
     voices = []
-    # 定义正则表达式模式，用于匹配 Name 和 Gender 行
-    pattern = re.compile(r"Name:\s*(.+)\s*Gender:\s*(.+)\s*", re.MULTILINE)
-    # 使用正则表达式查找所有匹配项
-    matches = pattern.findall(azure_voices_str)
-
-    for name, gender in matches:
+    for item in _load_azure_voices():
+        name = item["name"]
+        gender = item["gender"]
         # 应用过滤条件
         if filter_locals and any(
             name.lower().startswith(fl.lower()) for fl in filter_locals
@@ -1134,114 +238,120 @@ def is_siliconflow_voice(voice_name: str):
     return voice_name.startswith("siliconflow:")
 
 
-def is_voicebox_voice(voice_name: str):
-    """Check if it is a VoiceBox voice"""
-    return voice_name.startswith("voicebox:")
-
-
 def is_gemini_voice(voice_name: str):
-    """Check if it is a Gemini voice"""
+    """检查是否是Gemini TTS的声音"""
     return voice_name.startswith("gemini:")
 
 
-def get_voicebox_voices() -> list[str]:
-    """
-    Get available voices from VoiceBox API
-    Returns:
-        List of voices, e.g. ["voicebox:0", "voicebox:1", ...]
-    """
-    api_url = config.app.get("voicebox", {}).get("api_url", "http://localhost:5002")
-    try:
-        # VoiceBox might not have a voices endpoint, or it might be different.
-        # Assuming we just list IDs based on what's available or user config.
-        # For now, let's try to query the API if it exists, or return a default list.
-        # If VoiceBox is local, we might just return a generic list or check a specific endpoint.
-        
-        # Taking a safer approach: Let's assume a fixed list or try to fetch.
-        # If fetch fails, return a default like "voicebox:0"
-        
-        response = requests.get(f"{api_url}/voices", timeout=2)
-        if response.status_code == 200:
-            voices = response.json()
-            # Assuming voices is a list of dicts with 'id' or just names
-            # Adjust based on actual VoiceBox API response structure
-            # For now, let's assume it returns a list of objects with 'id'
-            return [f"voicebox:{v['id']}" for v in voices]
-    except Exception:
-        pass
-        
-    # Fallback default
-    return ["voicebox:0", "voicebox:1"]
+def is_mimo_voice(voice_name: str):
+    """检查是否是 Xiaomi MiMo TTS 的声音"""
+    return voice_name.startswith("mimo:")
 
 
-def voicebox_tts(
-    text: str,
-    voice_name: str,
-    voice_file: str,
-) -> Union[SubMaker, None]:
+def is_elevenlabs_voice(voice_name: str) -> bool:
+    return (voice_name or "").startswith("elevenlabs:")
+
+
+def is_chatterbox_voice(voice_name: str) -> bool:
+    return (voice_name or "").startswith("chatterbox:")
+
+
+def is_no_voice(voice_name: str | None) -> bool:
     """
-    Generate audio using VoiceBox API
+    判断用户是否明确选择了“无配音”模式。
+
+    这里刻意不把空字符串当成无配音：空 voice 更可能是配置损坏、旧版本
+    WebUI 状态丢失或接口参数缺失。只有明确的 sentinel 才进入静音分支，
+    这样可以避免把真实错误伪装成正常生成。
     """
-    api_url = config.app.get("voicebox", {}).get("api_url", "http://localhost:5002")
-    
-    # Extract voice ID from voice_name (remove 'voicebox:' prefix)
-    voice_id = voice_name.replace("voicebox:", "")
-    
-    # URL encoded text for GET request, or use POST
-    try:
-        # Using POST as it's safer for long text
-        payload = {
-            "text": text,
-            "speaker_id": voice_id, # VoiceBox usually uses speaker_id
-            # "style_wav": "" # If style cloning is used
-        }
-        
-        # Adjust endpoint based on VoiceBox API
-        # Common implementation: /tts with params
-        url = f"{api_url}/tts"
-        
-        response = requests.post(url, json=payload) # timeout=None as generation can be slow
-        
-        if response.status_code == 200:
-            with open(voice_file, "wb") as f:
-                f.write(response.content)
-            
-            # Create a basic SubMaker (no word alignment from VoiceBox usually)
-            sub_maker = SubMaker()
-            
-            # Get duration
-            from moviepy import AudioFileClip
-            audio_clip = AudioFileClip(voice_file)
-            audio_duration = audio_clip.duration
-            audio_clip.close()
-            
-            audio_duration_100ns = int(audio_duration * 10000000)
-            
-            # Split text for subtitles
-            sentences = utils.split_string_by_punctuations(text)
-            if sentences:
-                total_chars = sum(len(s) for s in sentences)
-                char_duration = audio_duration_100ns / total_chars if total_chars > 0 else 0
-                current_offset = 0
-                for sentence in sentences:
-                    if not sentence.strip(): continue
-                    duration = int(len(sentence) * char_duration)
-                    sub_maker.subs.append(sentence)
-                    sub_maker.offset.append((current_offset, current_offset + duration))
-                    current_offset += duration
-            else:
-                sub_maker.subs = [text]
-                sub_maker.offset = [(0, audio_duration_100ns)]
-                
-            logger.success(f"VoiceBox TTS succeeded: {voice_file}")
-            return sub_maker
-        else:
-            logger.error(f"VoiceBox TTS failed: {response.status_code} {response.text}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"VoiceBox TTS Exception: {e}")
-        return None
+    return str(voice_name or "").strip().lower() in _NO_VOICE_ALIASES
+
+
+def estimate_no_voice_duration(text: str) -> float:
+    """
+    为无配音模式估算一个稳定的视频时间轴长度。
+
+    无配音仍需要一个音频占位来驱动现有素材裁剪、字幕时间轴和最终合成。
+    估算策略尽量简单：
+    1. 中文等 CJK 字符按约 4.2 字/秒估算；
+    2. 英文/数字按约 2.7 词/秒估算；
+    3. 其他语种文字按约 4.0 字符/秒兜底估算，覆盖俄语、阿拉伯语、
+       日文假名、韩文等非 ASCII 文本；
+    4. 每个断句补一点停顿，让字幕切换不至于过于紧凑；
+    5. 最少 3 秒，避免极短脚本生成 0 秒音频。
+    """
+    normalized_text = (text or "").strip()
+    if not normalized_text:
+        return 3.0
+
+    cjk_chars = len(re.findall(r"[\u4e00-\u9fff]", normalized_text))
+    words = len(re.findall(r"[A-Za-z0-9]+", normalized_text))
+    ascii_word_chars = sum(len(word) for word in re.findall(r"[A-Za-z0-9]+", normalized_text))
+    other_text_chars = 0
+    for char in normalized_text:
+        # Unicode category 以 L 开头表示各语种字母，N 表示数字。前面已经单独
+        # 统计了 CJK 和 ASCII 单词，这里只统计剩余文字，避免英文被重复计时。
+        category = unicodedata.category(char)
+        if category.startswith(("L", "N")):
+            other_text_chars += 1
+    other_text_chars = max(other_text_chars - cjk_chars - ascii_word_chars, 0)
+    sentence_count = max(len(utils.split_string_by_punctuations(normalized_text)), 1)
+
+    cjk_duration = cjk_chars / 4.2
+    word_duration = words / 2.7
+    other_text_duration = other_text_chars / 4.0
+    pause_duration = max(sentence_count - 1, 0) * 0.35
+    return max(3.0, cjk_duration + word_duration + other_text_duration + pause_duration)
+
+
+def generate_silent_audio(duration_seconds: float, output_file: str) -> bool:
+    """
+    生成 MP3 静音音频，作为“无配音”模式的时间轴占位。
+
+    使用 FFmpeg 的 anullsrc 直接生成静音，比先构造临时 WAV 再转码更少中间
+    文件。失败时返回 False，让上层按普通 TTS 失败路径处理并记录日志。
+    """
+    ensure_file_path_exists(output_file)
+    duration_seconds = max(float(duration_seconds or 0), 0.1)
+    ffmpeg_binary = utils.get_ffmpeg_binary()
+    command = [
+        ffmpeg_binary,
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=44100:cl=mono",
+        "-t",
+        f"{duration_seconds:.3f}",
+        "-codec:a",
+        "libmp3lame",
+        "-q:a",
+        "4",
+        output_file,
+    ]
+
+    logger.info(
+        f"generating silent audio for no-voice mode, duration: {duration_seconds:.2f}s"
+    )
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        logger.error(
+            "failed to generate silent audio: "
+            f"{(result.stderr or result.stdout or '').strip()}"
+        )
+        return False
+    if not os.path.exists(output_file) or os.path.getsize(output_file) <= 0:
+        logger.error(
+            "silent audio output file is missing or empty, "
+            f"file: {output_file}, duration: {duration_seconds:.2f}s"
+        )
+        return False
+    return True
 
 
 def tts(
@@ -1251,15 +361,35 @@ def tts(
     voice_file: str,
     voice_volume: float = 1.0,
 ) -> Union[SubMaker, None]:
+    if is_no_voice(voice_name):
+        duration_seconds = estimate_no_voice_duration(text)
+        if not generate_silent_audio(duration_seconds, voice_file):
+            return None
+
+        sub_maker = ensure_legacy_submaker_fields(SubMaker())
+        return populate_legacy_submaker_with_full_text(
+            sub_maker=sub_maker,
+            text=text,
+            audio_duration_seconds=duration_seconds,
+        )
+
     if is_azure_v2_voice(voice_name):
-        return azure_tts_v2(text, voice_name, voice_file)
+        return azure_tts_v2(
+            text,
+            voice_name,
+            voice_file,
+            voice_rate=voice_rate,
+        )
     elif is_siliconflow_voice(voice_name):
-        # ... (siliconflow logic) ...
+        # 从voice_name中提取模型和声音
+        # 格式: siliconflow:model:voice-Gender
         parts = voice_name.split(":")
         if len(parts) >= 3:
             model = parts[1]
+            # 移除性别后缀，例如 "alex-Male" -> "alex"
             voice_with_gender = parts[2]
             voice = voice_with_gender.split("-")[0]
+            # 构建完整的voice参数，格式为 "model:voice"
             full_voice = f"{model}:{voice}"
             return siliconflow_tts(
                 text, model, full_voice, voice_rate, voice_file, voice_volume
@@ -1268,29 +398,329 @@ def tts(
             logger.error(f"Invalid siliconflow voice name format: {voice_name}")
             return None
     elif is_gemini_voice(voice_name):
-        # ... (gemini logic) ...
+        # 从voice_name中提取声音名称
+        # 格式: gemini:voice-Gender
         parts = voice_name.split(":")
         if len(parts) >= 2:
+            # 移除性别后缀，例如 "Zephyr-Female" -> "Zephyr"
             voice_with_gender = parts[1]
             voice = voice_with_gender.split("-")[0]
             return gemini_tts(text, voice, voice_rate, voice_file, voice_volume)
         else:
             logger.error(f"Invalid gemini voice name format: {voice_name}")
             return None
-    elif is_voicebox_voice(voice_name):
-        return voicebox_tts(text, voice_name, voice_file)
-        
+    elif is_mimo_voice(voice_name):
+        # 从voice_name中提取声音名称
+        # 格式: mimo:voice-Gender；如果调用方已执行 parse_voice_name，
+        # 则可能是 mimo:voice。两种格式都兼容。
+        parts = voice_name.split(":")
+        if len(parts) >= 2:
+            voice_with_gender = parts[1]
+            voice = voice_with_gender.split("-")[0]
+            return mimo_tts(text, voice, voice_rate, voice_file, voice_volume)
+        else:
+            logger.error(f"Invalid mimo voice name format: {voice_name}")
+            return None
+    elif is_elevenlabs_voice(voice_name):
+        # 格式: elevenlabs:{voice_id}:{name}
+        parts = voice_name.split(":")
+        if len(parts) >= 2:
+            voice_id = parts[1]
+            return elevenlabs_tts(text, voice_id, voice_file, voice_rate, voice_volume)
+        else:
+            logger.error(f"Invalid elevenlabs voice name format: {voice_name}")
+            return None
+    elif is_chatterbox_voice(voice_name):
+        # 格式: chatterbox:<voice>，voice 可带显示用的 -Female/-Male 后缀
+        parts = voice_name.split(":", 1)
+        if len(parts) >= 2 and parts[1].strip():
+            chatterbox_voice = parts[1].strip()
+            if chatterbox_voice.endswith(("-Female", "-Male")):
+                chatterbox_voice = chatterbox_voice.rsplit("-", 1)[0]
+            return chatterbox_tts(
+                text, chatterbox_voice, voice_file, voice_rate, voice_volume
+            )
+        else:
+            logger.error(f"Invalid chatterbox voice name format: {voice_name}")
+            return None
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
 
 
 def convert_rate_to_percent(rate: float) -> str:
-    if rate == 1.0:
-        return "+0%"
+    # edge-tts requires a sign-prefixed percentage (e.g. "+0%", "-20%").
+    # Rounding can yield 0 for rates near but not equal to 1.0 (e.g. 1.004,
+    # 0.997); those must still be returned as "+0%", not the unsigned "0%"
+    # which edge-tts rejects with ValueError: Invalid rate '0%'.
+    # API 或批处理调用可能传入 0、0.0、None 或无法转换的空值；这些值不代表
+    # 合法语速，直接计算会变成 -100% 或抛异常。这里统一回退到正常语速，
+    # 避免生成极慢音频或让 TTS 流程在边界输入下失败。
+    try:
+        rate = float(rate)
+    except (TypeError, ValueError):
+        rate = 1.0
+    if rate <= 0:
+        rate = 1.0
     percent = round((rate - 1.0) * 100)
-    if percent > 0:
+    if percent >= 0:
         return f"+{percent}%"
-    else:
-        return f"{percent}%"
+    return f"{percent}%"
+
+
+def ensure_file_path_exists(file_path: str) -> None:
+    """
+    确保输出文件所在目录一定存在。
+
+    这里单独做一层兜底，是因为 edge_tts 7.x 在真正发起网络请求之前，
+    就会先打开目标音频文件；如果目录不存在，会直接因为本地文件路径报错，
+    从而掩盖真正的 TTS 行为结果。
+    """
+    dir_path = os.path.dirname(file_path)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
+
+
+def ensure_legacy_submaker_fields(sub_maker: SubMaker) -> SubMaker:
+    """
+    为项目里仍然沿用旧字幕结构的调用方补齐兼容字段。
+
+    edge_tts 7.x 的 `SubMaker` 主要暴露 `cues/get_srt()`，但项目里 Azure v2、
+    Gemini、SiliconFlow 这些路径仍然会直接读写 `subs/offset`。这里统一补齐，
+    避免升级 edge_tts 后这些非 edge 路径被连带破坏。
+    """
+    if not hasattr(sub_maker, "subs"):
+        sub_maker.subs = []
+    if not hasattr(sub_maker, "offset"):
+        sub_maker.offset = []
+    return sub_maker
+
+
+def populate_legacy_submaker_with_full_text(
+    sub_maker: SubMaker, text: str, audio_duration_seconds: float
+) -> SubMaker:
+    """
+    用整段文本填充项目历史沿用的 `subs/offset` 字幕结构。
+
+    背景：
+    1. edge_tts 7.x 的 `SubMaker` 不再提供旧版本里的 `create_sub()`；
+    2. 项目里 Gemini、SiliconFlow 等非 edge 路径依然需要返回一个
+       带 `subs/offset` 的对象，供后续统一计算音频时长和生成字幕；
+    3. 对于拿不到逐词边界的 TTS 服务，需要至少按脚本断句切成多个片段，
+       这样后续 `subtitle_provider=edge` 的聚合逻辑才能继续工作，而不是
+       因为整段文本无法和脚本断句逐行匹配而回退 Whisper。
+
+    Args:
+        sub_maker: 需要写入兼容字段的字幕对象
+        text: 原始脚本文本
+        audio_duration_seconds: 音频总时长，单位秒
+
+    Returns:
+        已填充兼容字幕数据的 SubMaker 对象
+    """
+    sub_maker = ensure_legacy_submaker_fields(sub_maker)
+
+    # 清空旧值，避免调用方重复复用对象时出现脏数据叠加。
+    sub_maker.subs = []
+    sub_maker.offset = []
+
+    normalized_text = (text or "").strip()
+    if not normalized_text:
+        return sub_maker
+
+    audio_duration_100ns = max(int(audio_duration_seconds * 10000000), 1)
+
+    # Gemini / SiliconFlow 这类路径拿不到逐词边界时，仍然尽量沿用项目
+    # 原来的“按标点断句 + 按字符数比例分配时长”的策略。这样既能让
+    # create_subtitle() 匹配脚本断句，也能避免再次回退 Whisper。
+    sentences = utils.split_string_by_punctuations(normalized_text)
+    if not sentences:
+        sentences = [normalized_text]
+
+    total_chars = sum(len(sentence) for sentence in sentences)
+    if total_chars <= 0:
+        sub_maker.subs.append(normalized_text)
+        sub_maker.offset.append((0, audio_duration_100ns))
+        return sub_maker
+
+    current_offset = 0
+    for index, sentence in enumerate(sentences):
+        cleaned_sentence = sentence.strip()
+        if not cleaned_sentence:
+            continue
+
+        # 前面的句子按字符数比例分配时长，最后一句兜底吃掉剩余时长，
+        # 避免整数取整导致总时长丢失或字幕结束时间短于音频。
+        if index == len(sentences) - 1:
+            sentence_end = audio_duration_100ns
+        else:
+            sentence_chars = len(cleaned_sentence)
+            sentence_duration = max(
+                int(audio_duration_100ns * (sentence_chars / total_chars)),
+                1,
+            )
+            sentence_end = min(current_offset + sentence_duration, audio_duration_100ns)
+
+        sub_maker.subs.append(cleaned_sentence)
+        sub_maker.offset.append((current_offset, sentence_end))
+        current_offset = sentence_end
+
+    return sub_maker
+
+
+def create_edge_tts_communicate(
+    text: str, voice_name: str, rate_str: str
+) -> edge_tts.Communicate:
+    """
+    按当前已安装的 edge_tts 版本构造 Communicate 对象。
+
+    背景：
+    1. 主线代码已经升级到 edge_tts 7.x，并使用 `boundary` 参数拿到更细的边界事件；
+    2. 但 Windows 便携包如果更新失败，现场环境可能仍然停留在旧版 edge_tts；
+    3. 旧版 `Communicate.__init__()` 不接受 `boundary`，会直接抛出
+       `unexpected keyword argument 'boundary'`，导致整个 TTS 链路失败。
+
+    因此这里先根据构造函数签名探测当前版本支持的参数，再决定是否传入
+    `boundary`，让同一份代码同时兼容旧版和新版依赖。
+    """
+    communicate_kwargs = {"rate": rate_str}
+    communicate_signature = inspect.signature(edge_tts.Communicate)
+
+    if "boundary" in communicate_signature.parameters:
+        communicate_kwargs["boundary"] = "WordBoundary"
+
+    return edge_tts.Communicate(text, voice_name, **communicate_kwargs)
+
+
+def get_edge_tts_timeout_seconds() -> Union[float, None]:
+    """
+    获取 Azure TTS V1 单次流式请求的超时时间。
+
+    背景：
+    Edge consumer TTS 在网络不通、服务端限流、voice 与文本语言不匹配等场景下，
+    可能长时间卡在 `stream_sync()` 内部，日志只停留在 `start`。这里提供一个
+    默认超时，避免 WebUI 任务长期无反馈。
+
+    使用方式：
+    - 默认 30 秒，覆盖常见短视频脚本的首包等待时间；
+    - 如用户处于慢网络或代理环境，可在 `config.toml` 里设置
+      `edge_tts_timeout = 60`；
+    - 设置为 0 或负数表示显式禁用超时，保留完全向后兼容。
+    """
+    raw_timeout = config.app.get(
+        "edge_tts_timeout", _DEFAULT_EDGE_TTS_TIMEOUT_SECONDS
+    )
+    try:
+        timeout_seconds = float(raw_timeout)
+    except (TypeError, ValueError):
+        logger.warning(
+            "invalid edge_tts_timeout: "
+            f"{raw_timeout}, fallback to {_DEFAULT_EDGE_TTS_TIMEOUT_SECONDS}s"
+        )
+        timeout_seconds = _DEFAULT_EDGE_TTS_TIMEOUT_SECONDS
+
+    if timeout_seconds <= 0:
+        return None
+
+    return timeout_seconds
+
+
+def _stream_edge_tts_sync_with_timeout(
+    communicate, on_chunk, timeout_seconds: float
+) -> None:
+    """
+    带总超时地消费 edge_tts 7.x 的同步流。
+
+    实现原因：
+    `stream_sync()` 本身是阻塞迭代器，网络层卡住时主线程无法及时恢复。
+    这里把阻塞迭代放到 daemon 线程中，主线程通过 Queue 获取 chunk，
+    到达超时时间后直接抛出 TimeoutError，让外层重试和错误日志继续工作。
+
+    注意：
+    daemon 线程只作为兜底保护使用，最多随 Azure TTS V1 的 3 次重试产生
+    少量残留线程；进程退出时会自动回收。相比 WebUI 任务永久卡住，这是
+    更可控的失败模式。
+    """
+    stream_queue = queue.Queue()
+    done_marker = object()
+
+    def _produce_chunks():
+        try:
+            for chunk in communicate.stream_sync():
+                stream_queue.put(("chunk", chunk))
+            stream_queue.put(("done", done_marker))
+        except Exception as e:
+            stream_queue.put(("error", e))
+
+    thread = threading.Thread(target=_produce_chunks, daemon=True)
+    thread.start()
+
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            raise TimeoutError(
+                f"edge_tts stream timed out after {timeout_seconds:g}s"
+            )
+
+        try:
+            item_type, payload = stream_queue.get(
+                timeout=min(0.5, remaining_seconds)
+            )
+        except queue.Empty:
+            continue
+
+        if item_type == "chunk":
+            on_chunk(payload)
+        elif item_type == "error":
+            raise payload
+        elif item_type == "done":
+            return
+
+
+def stream_edge_tts_chunks(
+    communicate, on_chunk, timeout_seconds: Union[float, None] = None
+) -> None:
+    """
+    统一消费 edge_tts 的同步流和旧版异步流。
+
+    edge_tts 7.x 提供 `stream_sync()`，可以在同步函数里直接迭代；
+    更早的版本通常只有异步 `stream()`。为了让 `azure_tts_v1()` 在
+    旧依赖残留场景下仍能继续工作，这里统一做一层流式兼容。
+
+    Args:
+        communicate: edge_tts.Communicate 实例
+        on_chunk: 每拿到一个事件块时执行的回调
+        timeout_seconds: 单次流式请求总超时；为 None 时不启用超时。
+    """
+    if hasattr(communicate, "stream_sync"):
+        if timeout_seconds:
+            _stream_edge_tts_sync_with_timeout(
+                communicate, on_chunk, timeout_seconds
+            )
+            return
+
+        for chunk in communicate.stream_sync():
+            on_chunk(chunk)
+        return
+
+    if not hasattr(communicate, "stream"):
+        raise AttributeError("edge_tts communicate object has no stream method")
+
+    async def _consume_async_stream():
+        async for chunk in communicate.stream():
+            on_chunk(chunk)
+
+    # 这里显式创建独立事件循环，而不是复用外部上下文，目的是避免
+    # 在同步调用栈里遇到“当前线程没有事件循环”或跨线程复用循环的问题。
+    loop = asyncio.new_event_loop()
+    try:
+        if timeout_seconds:
+            loop.run_until_complete(
+                asyncio.wait_for(_consume_async_stream(), timeout=timeout_seconds)
+            )
+        else:
+            loop.run_until_complete(_consume_async_stream())
+    finally:
+        loop.close()
 
 
 def azure_tts_v1(
@@ -1303,54 +733,48 @@ def azure_tts_v1(
         try:
             logger.info(f"start, voice name: {voice_name}, try: {i + 1}")
 
-            async def _do() -> SubMaker:
-                communicate = edge_tts.Communicate(text, voice_name, rate=rate_str)
-                sub_maker = SubMaker() # Use local SubMaker
-                with open(voice_file, "wb") as file:
-                    try:
-                        async for chunk in communicate.stream():
-                            if chunk["type"] == "audio":
-                                file.write(chunk["data"])
-                            elif chunk["type"] == "WordBoundary":
-                                sub_maker.create_sub(
-                                    (chunk["offset"], chunk["duration"]), chunk["text"]
-                                )
-                    except Exception as stream_e:
-                        logger.error(f"Error during edge-tts stream: {stream_e}")
-                        raise stream_e
-                return sub_maker
+            # 这里同时兼容 edge_tts 7.x 和旧版便携包里可能残留的老依赖：
+            # 1. 新版支持 `boundary` + `stream_sync()`
+            # 2. 旧版不支持 `boundary`，且通常只暴露异步 `stream()`
+            ensure_file_path_exists(voice_file)
+            communicate = create_edge_tts_communicate(text, voice_name, rate_str)
+            sub_maker = edge_tts.SubMaker()
+            timeout_seconds = get_edge_tts_timeout_seconds()
 
-            sub_maker = asyncio.run(_do())
-            if sub_maker:
-                logger.debug(f"SubMaker subs count: {len(sub_maker.subs)}")
-            
-            if not sub_maker or not sub_maker.subs:
-                if os.path.exists(voice_file) and os.path.getsize(voice_file) > 0:
-                    logger.warning("sub_maker is empty but audio file exists, falling back to full duration subtitle")
-                    try:
-                        from moviepy import AudioFileClip
-                        audio_clip = AudioFileClip(voice_file)
-                        audio_duration = audio_clip.duration
-                        audio_clip.close()
-                        audio_duration_100ns = int(audio_duration * 10000000)
-                        
-                        if not sub_maker:
-                            sub_maker = SubMaker()
-                        
-                        sub_maker.subs.append(text)
-                        sub_maker.offset.append((0, audio_duration_100ns))
-                        logger.info(f"created fallback subtitle for {voice_file}, duration: {audio_duration}s")
-                        return sub_maker
-                    except Exception as e:
-                        logger.error(f"failed to create fallback subtitle: {str(e)}")
-                
-                logger.warning("failed, sub_maker is None or sub_maker.subs is None")
+            with open(voice_file, "wb") as file:
+                def _handle_chunk(chunk):
+                    chunk_type = chunk["type"]
+                    if chunk_type == "audio":
+                        file.write(chunk["data"])
+                    elif chunk_type in ["WordBoundary", "SentenceBoundary"]:
+                        # 无论来自 7.x 的同步流，还是旧版异步流，只要事件结构
+                        # 里仍有边界信息，就统一喂给 SubMaker，保证后续字幕链路
+                        # 仍然走项目现有逻辑。
+                        sub_maker.feed(chunk)
+
+                stream_edge_tts_chunks(
+                    communicate, _handle_chunk, timeout_seconds=timeout_seconds
+                )
+
+            if not sub_maker.get_srt():
+                logger.warning("failed, sub_maker.get_srt() is empty")
                 continue
 
             logger.info(f"completed, output file: {voice_file}")
             return sub_maker
         except Exception as e:
             logger.error(f"failed, error: {str(e)}")
+            # TTS 流式写入如果在首包前超时或网络异常，会留下 0 字节音频文件。
+            # 这种文件既不可播放，也可能误导后续排查，因此失败后只清理空文件；
+            # 如果已经写入了部分数据，则保留现场文件，便于分析服务端返回内容。
+            if os.path.exists(voice_file) and os.path.getsize(voice_file) == 0:
+                try:
+                    os.remove(voice_file)
+                except Exception as remove_error:
+                    logger.warning(
+                        "failed to remove empty tts file: "
+                        f"{voice_file}, error: {str(remove_error)}"
+                    )
     return None
 
 
@@ -1417,8 +841,8 @@ def siliconflow_tts(
                 with open(voice_file, "wb") as f:
                     f.write(response.content)
 
-                # 创建一个空的SubMaker对象
-                sub_maker = SubMaker()
+                # 这里仍然沿用项目原有的字幕结构，因此需要补齐旧字段。
+                sub_maker = ensure_legacy_submaker_fields(SubMaker())
 
                 # 获取音频文件的实际长度
                 try:
@@ -1480,7 +904,10 @@ def siliconflow_tts(
                     ]
 
                 logger.success(f"siliconflow tts succeeded: {voice_file}")
-                print("s", sub_maker.subs, sub_maker.offset)
+                logger.debug(
+                    "siliconflow subtitle timeline generated, "
+                    f"subs: {len(sub_maker.subs)}, offsets: {len(sub_maker.offset)}"
+                )
                 return sub_maker
             else:
                 logger.error(
@@ -1492,12 +919,43 @@ def siliconflow_tts(
     return None
 
 
-def azure_tts_v2(text: str, voice_name: str, voice_file: str) -> Union[SubMaker, None]:
+def _build_azure_v2_ssml(text: str, voice_name: str, voice_rate: float) -> str:
+    """构造 Azure Speech V2 使用的 SSML，并安全规范化语速参数。"""
+    try:
+        normalized_rate = float(voice_rate)
+    except (TypeError, ValueError):
+        normalized_rate = 1.0
+    normalized_rate = max(0.25, min(4.0, normalized_rate))
+
+    voice_locale_parts = voice_name.split("-", 2)
+    voice_locale = (
+        "-".join(voice_locale_parts[:2])
+        if len(voice_locale_parts) >= 2
+        else "en-US"
+    )
+    escaped_text = escape(text)
+    escaped_voice_name = escape(voice_name, {'"': "&quot;"})
+    return (
+        '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+        f'xml:lang="{voice_locale}">'
+        f'<voice name="{escaped_voice_name}">'
+        f'<prosody rate="{normalized_rate:g}">{escaped_text}</prosody>'
+        "</voice></speak>"
+    )
+
+
+def azure_tts_v2(
+    text: str,
+    voice_name: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+) -> Union[SubMaker, None]:
     voice_name = is_azure_v2_voice(voice_name)
     if not voice_name:
         logger.error(f"invalid voice name: {voice_name}")
         raise ValueError(f"invalid voice name: {voice_name}")
     text = text.strip()
+    ssml = _build_azure_v2_ssml(text, voice_name, voice_rate)
 
     def _format_duration_to_offset(duration) -> int:
         if isinstance(duration, str):
@@ -1517,11 +975,13 @@ def azure_tts_v2(text: str, voice_name: str, voice_file: str) -> Union[SubMaker,
 
     for i in range(3):
         try:
-            logger.info(f"start, voice name: {voice_name}, try: {i + 1}")
+            logger.info(
+                f"start, voice name: {voice_name}, rate: {voice_rate}, try: {i + 1}"
+            )
 
             import azure.cognitiveservices.speech as speechsdk
 
-            sub_maker = SubMaker()
+            sub_maker = ensure_legacy_submaker_fields(SubMaker())
 
             def speech_synthesizer_word_boundary_cb(evt: speechsdk.SessionEventArgs):
                 # print('WordBoundary event:')
@@ -1568,7 +1028,9 @@ def azure_tts_v2(text: str, voice_name: str, voice_file: str) -> Union[SubMaker,
                 speech_synthesizer_word_boundary_cb
             )
 
-            result = speech_synthesizer.speak_text_async(text).get()
+            # speak_text_async() 不支持语速参数。使用 SSML prosody 后，试听和
+            # 正式生成都会按 WebUI/API 传入的 voice_rate 调整语速。
+            result = speech_synthesizer.speak_ssml_async(ssml).get()
             if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
                 logger.success(f"azure v2 speech synthesis succeeded: {voice_file}")
                 return sub_maker
@@ -1608,41 +1070,40 @@ def gemini_tts(
         SubMaker对象或None
     """
     import base64
-    import json
     import io
     from pydub import AudioSegment
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
+    _configure_pydub_ffmpeg(AudioSegment)
     
     try:
-        # 配置Gemini API
         api_key = config.app.get("gemini_api_key", "")
         if not api_key:
             logger.error("Gemini API key is not set")
             return None
-            
-        genai.configure(api_key=api_key)
-        
+
         logger.info(f"start, voice name: {voice_name}, try: 1")
-        
-        # 使用Gemini TTS API
-        model = genai.GenerativeModel("gemini-2.5-flash-preview-tts")
-        
-        generation_config = {
-            "response_modalities": ["AUDIO"],
-            "speech_config": {
-                "voice_config": {
-                    "prebuilt_voice_config": {
-                        "voice_name": voice_name
-                    }
-                }
-            }
-        }
-        
-        response = model.generate_content(
-            contents=text,
-            generation_config=generation_config
+
+        generation_config = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=voice_name
+                    )
+                )
+            ),
         )
-        
+
+        # google-genai 使用统一 Client 调用文本和 TTS 模型。上下文管理器确保
+        # 请求结束后释放 HTTP 连接，同时保留原有 PCM 转码和字幕时间轴逻辑。
+        with genai.Client(api_key=api_key) as client:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-preview-tts",
+                contents=text,
+                config=generation_config,
+            )
+
         # 检查响应
         if not response.candidates or not response.candidates[0].content:
             logger.error("No audio content received from Gemini TTS")
@@ -1683,25 +1144,28 @@ def gemini_tts(
             logger.error(f"Failed to load PCM audio: {e}")
             return None
         
-        # 导出为MP3格式
-        audio_segment.export(voice_file, format="mp3")
+        # API、CLI 或测试可以直接把尚不存在的嵌套目录作为输出位置。这里在
+        # 真正写文件前统一创建父目录，避免一次成功的 Gemini 请求最后因为
+        # 本地路径不存在而丢失结果，也让该 provider 与其他 TTS 实现行为一致。
+        ensure_file_path_exists(voice_file)
+
+        # pydub 会返回打开的输出文件对象。批量生成时若不主动关闭，文件描述符
+        # 会持续累积，并在 Windows 上增加后续覆盖或删除音频文件失败的概率。
+        exported_audio = audio_segment.export(voice_file, format="mp3")
+        exported_audio.close()
         
         logger.info(f"completed, output file: {voice_file}")
         
-        # 创建SubMaker对象用于字幕
-        sub_maker = SubMaker()
+        # Gemini 拿不到 edge_tts 那种逐词边界事件，因此这里退回到
+        # 项目原有的 `subs/offset` 兼容结构，至少保证后续字幕与时长
+        # 计算链路可继续工作。
+        sub_maker = ensure_legacy_submaker_fields(SubMaker())
         audio_duration = len(audio_segment) / 1000.0  # 转换为秒
-        
-        # 将音频长度转换为100纳秒单位（与edge_tts兼容）
-        audio_duration_100ns = int(audio_duration * 10000000)
-        
-        # 使用create_sub方法正确创建字幕项
-        sub_maker.create_sub(
-            (0, audio_duration_100ns), 
-            text
+        return populate_legacy_submaker_with_full_text(
+            sub_maker=sub_maker,
+            text=text,
+            audio_duration_seconds=audio_duration,
         )
-        
-        return sub_maker
         
     except ImportError as e:
         logger.error(f"Missing required package for Gemini TTS: {str(e)}. Please install: pip install pydub")
@@ -1711,16 +1175,503 @@ def gemini_tts(
         return None
 
 
+def mimo_tts(
+    text: str,
+    voice_name: str,
+    voice_rate: float,
+    voice_file: str,
+    voice_volume: float = 1.0,
+) -> Union[SubMaker, None]:
+    """
+    使用 Xiaomi MiMo V2.5 TTS 生成语音。
+
+    官方接口兼容 OpenAI Chat Completions，但 TTS 有两个关键差异：
+    1. 待合成文本必须放在 `assistant` 消息里；
+    2. 音频以 `message.audio.data` 的 base64 字符串返回。
+
+    MiMo 当前没有返回逐词时间轴，因此这里复用项目已有的 legacy
+    SubMaker 兜底方案：根据最终音频时长和脚本文本断句生成字幕时间轴。
+    """
+    from pydub import AudioSegment
+
+    text = (text or "").strip()
+    if not text:
+        logger.error("MiMo TTS text is empty")
+        return None
+
+    api_key = config.app.get("mimo_api_key", "")
+    if not api_key:
+        logger.error("MiMo API key is not set")
+        return None
+
+    base_url = config.app.get("mimo_base_url", "") or _MIMO_DEFAULT_BASE_URL
+    model_name = config.app.get("mimo_tts_model_name", "") or _MIMO_DEFAULT_TTS_MODEL
+    style_prompt = config.app.get(
+        "mimo_tts_style_prompt",
+        "请用自然、清晰、适合短视频旁白的语气朗读。",
+    )
+
+    _configure_pydub_ffmpeg(AudioSegment)
+
+    for i in range(3):
+        try:
+            logger.info(
+                f"start mimo tts, model: {model_name}, voice: {voice_name}, try: {i + 1}"
+            )
+            ensure_file_path_exists(voice_file)
+
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "user", "content": style_prompt},
+                    {"role": "assistant", "content": text},
+                ],
+                audio={
+                    "format": "wav",
+                    "voice": voice_name,
+                },
+            )
+
+            if not completion or not getattr(completion, "choices", None):
+                raise ValueError("MiMo TTS returned empty response")
+
+            message = completion.choices[0].message
+            audio = getattr(message, "audio", None)
+            audio_data = None
+            if isinstance(audio, dict):
+                audio_data = audio.get("data")
+            elif audio is not None:
+                audio_data = getattr(audio, "data", None)
+
+            if not audio_data:
+                raise ValueError("MiMo TTS returned empty audio data")
+
+            audio_bytes = base64.b64decode(audio_data)
+            audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format="wav")
+
+            output_format = utils.parse_extension(voice_file) or "mp3"
+            if output_format == "wav":
+                with open(voice_file, "wb") as f:
+                    f.write(audio_bytes)
+            else:
+                audio_segment.export(voice_file, format=output_format)
+
+            audio_duration = len(audio_segment) / 1000.0
+            sub_maker = ensure_legacy_submaker_fields(SubMaker())
+            logger.success(f"mimo tts succeeded: {voice_file}")
+            logger.debug(
+                "mimo subtitle timeline generated, "
+                f"duration: {audio_duration:.3f}s, output_format: {output_format}"
+            )
+            return populate_legacy_submaker_with_full_text(
+                sub_maker=sub_maker,
+                text=text,
+                audio_duration_seconds=audio_duration,
+            )
+        except Exception as e:
+            logger.error(f"mimo tts failed: {str(e)}")
+
+    return None
+
+
+def elevenlabs_tts(
+    text: str,
+    voice_id: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+    model_id: str = "",
+) -> Union[SubMaker, None]:
+    text = (text or "").strip()
+    if not text:
+        logger.error("ElevenLabs TTS text is empty")
+        return None
+
+    api_key = config.elevenlabs.get("api_key", "")
+    if not api_key:
+        logger.error("ElevenLabs API key is not set")
+        return None
+
+    if not model_id:
+        model_id = config.elevenlabs.get("model_id", "eleven_multilingual_v2")
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    headers = {
+        "xi-api-key": api_key,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "text": text,
+        "model_id": model_id,
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.0,
+            "use_speaker_boost": True,
+        },
+    }
+
+    # Errors where retrying will never help (auth/access/validation failures).
+    _NON_RETRYABLE_CODES = {401, 403, 422}
+    _NON_RETRYABLE_STATUSES = {"voice_disabled", "voice_access_denied", "unauthorized"}
+
+    for i in range(3):
+        try:
+            logger.info(f"start elevenlabs tts, voice_id: {voice_id}, try: {i + 1}")
+            ensure_file_path_exists(voice_file)
+
+            response = requests.post(url, json=payload, headers=headers, timeout=60)
+            if response.status_code != 200:
+                error_status = ""
+                try:
+                    detail = response.json().get("detail", {})
+                    if isinstance(detail, dict):
+                        error_status = detail.get("status", "")
+                except Exception:
+                    pass
+
+                if response.status_code in _NON_RETRYABLE_CODES or error_status in _NON_RETRYABLE_STATUSES:
+                    logger.error(
+                        f"ElevenLabs TTS failed (non-retryable) — voice_id: {voice_id}, "
+                        f"status: {response.status_code}, error: {error_status or response.text[:200]}. "
+                        "Please select a different ElevenLabs voice."
+                    )
+                    return None
+
+                logger.error(
+                    f"elevenlabs tts failed with status {response.status_code}: {response.text[:200]}"
+                )
+                continue
+
+            with open(voice_file, "wb") as f:
+                f.write(response.content)
+
+            audio_clip = AudioFileClip(voice_file)
+            audio_duration = audio_clip.duration
+            audio_clip.close()
+
+            sub_maker = ensure_legacy_submaker_fields(SubMaker())
+            logger.success(f"elevenlabs tts succeeded: {voice_file}")
+            return populate_legacy_submaker_with_full_text(
+                sub_maker=sub_maker,
+                text=text,
+                audio_duration_seconds=audio_duration,
+            )
+        except Exception as e:
+            logger.error(f"elevenlabs tts failed: {str(e)}")
+
+    return None
+
+
+def chatterbox_tts(
+    text: str,
+    voice: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+    model_id: str = "",
+) -> Union[SubMaker, None]:
+    """Generate speech with a self-hosted Chatterbox TTS server.
+
+    Chatterbox (Resemble AI, MIT) is an open-source, locally hosted TTS model
+    with zero-shot voice cloning — a self-hostable alternative to ElevenLabs.
+    This talks to an OpenAI-compatible ``/audio/speech`` endpoint, so it works
+    with the common community servers (e.g. devnen/Chatterbox-TTS-Server,
+    travisvn/chatterbox-tts-api). Configure ``[chatterbox] base_url`` (and an
+    optional ``api_key``).
+
+    Like ElevenLabs, Chatterbox does not return word-level timestamps, so the
+    subtitle path falls back to the full-text SubMaker. For tighter subtitle
+    sync set ``subtitle_provider = "whisper"``.
+    """
+    text = (text or "").strip()
+    if not text:
+        logger.error("Chatterbox TTS text is empty")
+        return None
+
+    base_url = (config.chatterbox.get("base_url", "") or "").strip().rstrip("/")
+    if not base_url:
+        logger.error(
+            "Chatterbox base_url is not set, please configure [chatterbox] base_url in config.toml"
+        )
+        return None
+
+    api_key = config.chatterbox.get("api_key", "")
+    if not model_id:
+        model_id = config.chatterbox.get("model_id", "chatterbox") or "chatterbox"
+
+    url = f"{base_url}/audio/speech"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = {
+        "model": model_id,
+        "input": text,
+        "voice": voice,
+        "response_format": "mp3",
+        # OpenAI speech API accepts speed 0.25-4.0; MoneyPrinterTurbo's rate is a
+        # 1.0-centred multiplier, so it maps directly (clamped to the valid range).
+        "speed": max(0.25, min(4.0, float(voice_rate or 1.0))),
+    }
+    # voice_volume is accepted for parity with the other TTS providers but is
+    # intentionally not sent: the OpenAI /audio/speech contract has no volume
+    # field, so Chatterbox servers ignore it. Adjust loudness via voice_rate
+    # (speed) or in post-processing instead.
+
+    for i in range(3):
+        try:
+            logger.info(f"start chatterbox tts, voice: {voice}, try: {i + 1}")
+            ensure_file_path_exists(voice_file)
+
+            response = requests.post(url, json=payload, headers=headers, timeout=120)
+            if response.status_code != 200:
+                logger.error(
+                    f"chatterbox tts failed with status {response.status_code}: {response.text[:200]}"
+                )
+                continue
+
+            with open(voice_file, "wb") as f:
+                f.write(response.content)
+
+            audio_clip = AudioFileClip(voice_file)
+            audio_duration = audio_clip.duration
+            audio_clip.close()
+
+            sub_maker = ensure_legacy_submaker_fields(SubMaker())
+            logger.success(f"chatterbox tts succeeded: {voice_file}")
+            return populate_legacy_submaker_with_full_text(
+                sub_maker=sub_maker,
+                text=text,
+                audio_duration_seconds=audio_duration,
+            )
+        except Exception as e:
+            logger.error(f"chatterbox tts failed: {str(e)}")
+
+    return None
+
+
 def _format_text(text: str) -> str:
-    # text = text.replace("\n", " ")
+    """
+    清理字幕对齐前的脚本文本。
+
+    这里不能只在 LLM 生成阶段处理，因为用户也可能手动粘贴脚本，或通过
+    API 直接传入包含 Markdown 标记的文本。TTS 通常不会朗读 `---`、
+    `___`、`***` 这类分隔符行，也不会朗读 `_` 这种强调标记；如果字幕
+    对齐仍保留这些字符，`create_subtitle()` 会一直等待不存在的 cue，
+    最终导致字幕文件缺失并在 Whisper fallback 校正时补出全 0 时间轴。
+    """
     text = text.replace("[", " ")
     text = text.replace("]", " ")
     text = text.replace("(", " ")
     text = text.replace(")", " ")
     text = text.replace("{", " ")
     text = text.replace("}", " ")
-    text = text.strip()
+    return utils.normalize_script_for_subtitle_matching(text)
+
+
+def _build_subtitle_formatter():
+    """
+    返回统一的 SRT 行格式化函数。
+
+    这里单独拆成一个小工具，是为了让 edge_tts 7.x 的 cues 路径
+    和项目原有的 legacy `subs/offset` 路径共用同一套字幕落盘格式，
+    避免两套逻辑各自产生细微格式差异。
+    """
+
+    def formatter(idx: int, start_time: float, end_time: float, sub_text: str) -> str:
+        start_t = mktimestamp(start_time).replace(".", ",")
+        end_t = mktimestamp(end_time).replace(".", ",")
+        return f"{idx}\n{start_t} --> {end_t}\n{sub_text}\n"
+
+    return formatter
+
+
+# 阿拉伯语变音符号和 Tatweel 拉长符在 edge-tts 返回文本中可能出现，
+# 这些字符不影响语义，但会导致脚本文本和字幕 cue 字符串精确匹配失败。
+_ARABIC_DIACRITICS = re.compile("[\u0610-\u061A\u064B-\u065F\u0670\u0640\u06D6-\u06ED]")
+
+
+def _normalize_arabic(text: str) -> str:
+    """统一阿拉伯语常见字母变体，提升字幕 cue 与脚本行的匹配容错率。
+
+    edge-tts 对阿拉伯语可能返回与原脚本不同的字母形态，例如把 أ/إ/آ
+    归一成 ا，或者携带变音符号。这里仅在最后一层匹配兜底中使用，
+    不改变原始字幕文本，避免影响最终展示内容。
+    """
+    text = _ARABIC_DIACRITICS.sub("", text)
+    for src, dst in (
+        ("أإآٱ", "ا"),
+        ("ىئ", "ي"),
+        ("ة", "ه"),
+        ("ؤ", "و"),
+    ):
+        for ch in src:
+            text = text.replace(ch, dst)
     return text
+
+
+def _match_script_line(script_lines: list[str], current_text: str, sub_index: int) -> str:
+    """
+    尝试把当前累计的字幕文本，与脚本中的某一条标准断句匹配起来。
+
+    这里复用了项目原有的“按标点拆脚本，再逐段比对”的思路：
+    1. 优先精确匹配；
+    2. 再做一次去标点和 Markdown `_` 格式符后的匹配；
+    3. 最后做一次阿拉伯语字符形态归一化匹配。
+
+    这样可以兼容：
+    - TTS 返回里可能缺失或单独拆分的标点；
+    - 中文场景下词边界和脚本文本不完全一一对应的情况。
+    """
+    if len(script_lines) <= sub_index:
+        return ""
+
+    target_line = script_lines[sub_index]
+    if current_text == target_line:
+        return target_line.strip()
+
+    current_text_normalized = re.sub(r"[_\W]+", "", current_text)
+    target_line_normalized = re.sub(r"[_\W]+", "", target_line)
+    if current_text_normalized == target_line_normalized:
+        return target_line.strip()
+
+    # 最后一层阿拉伯语容错：edge-tts 返回的字母形态、变音符号或 Tatweel
+    # 可能和脚本不同。只在常规匹配失败后归一化比较，非阿拉伯语文本不会受影响。
+    current_ar = re.sub(r"[_\W]+", "", _normalize_arabic(current_text))
+    target_ar = re.sub(r"[_\W]+", "", _normalize_arabic(target_line))
+    if current_ar and current_ar == target_ar:
+        return target_line.strip()
+
+    return ""
+
+
+def _write_subtitle_items(sub_items: list[str], subtitle_file: str) -> bool:
+    """
+    将已经聚合好的字幕段写入到 SRT 文件，并做一次基本可读性验证。
+
+    返回值：
+    - `True`：字幕文件成功落盘且可被 moviepy 解析；
+    - `False`：字幕文件写入或解析失败。
+    """
+    try:
+        ensure_file_path_exists(subtitle_file)
+        with open(subtitle_file, "w", encoding="utf-8") as file:
+            file.write("\n".join(sub_items) + "\n")
+
+        sbs = subtitles.file_to_subtitles(subtitle_file, encoding="utf-8")
+        duration = max([tb for ((ta, tb), txt) in sbs]) if sbs else 0
+        logger.info(
+            f"completed, subtitle file created: {subtitle_file}, duration: {duration}"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"failed, error: {str(e)}")
+        if os.path.exists(subtitle_file):
+            os.remove(subtitle_file)
+        return False
+
+
+def _build_subtitle_items_from_edge_cues(
+    sub_maker: SubMaker, script_lines: list[str]
+) -> list[str]:
+    """
+    将 edge_tts 7.x 的细粒度 `cues` 聚合为按脚本断句的 SRT 片段。
+
+    背景：
+    edge_tts 7.x 的 `SubMaker.get_srt()` 更偏向逐词/逐短语的时间轴。
+    对英文做逐词高亮尚可，但中文短视频字幕如果直接照搬，会出现
+    “金钱 / 是 / 一种 / 社会 / 工具” 这种阅读体验很差的效果。
+
+    实现策略：
+    1. 逐个消费 cues 中的 `content`；
+    2. 累积成一段候选文本；
+    3. 当候选文本与脚本里当前目标断句匹配时，收敛为一个完整字幕段；
+    4. 使用第一条 cue 的开始时间和最后一条 cue 的结束时间，保证时间轴连续。
+    """
+    formatter = _build_subtitle_formatter()
+    sub_items = []
+    sub_index = 0
+    current_text = ""
+    current_start_time = None
+
+    for cue in sub_maker.cues:
+        cue_text = unescape(cue.content)
+        if current_start_time is None:
+            current_start_time = int(cue.start.total_seconds() * 10000000)
+
+        current_end_time = int(cue.end.total_seconds() * 10000000)
+        current_text += cue_text
+
+        matched_text = _match_script_line(script_lines, current_text, sub_index)
+        if not matched_text:
+            continue
+
+        sub_index += 1
+        sub_items.append(
+            formatter(
+                idx=sub_index,
+                start_time=current_start_time,
+                end_time=current_end_time,
+                sub_text=matched_text,
+            )
+        )
+        current_text = ""
+        current_start_time = None
+
+    if current_text.strip():
+        logger.warning(
+            f"edge cues still have unmatched text after aggregation: {current_text}"
+        )
+
+    return sub_items
+
+
+def _build_subtitle_items_from_legacy_submaker(
+    sub_maker: SubMaker, script_lines: list[str]
+) -> list[str]:
+    """
+    将项目原有 `subs/offset` 结构聚合为按脚本断句的 SRT 片段。
+
+    这部分保留了原来的核心思路，只是拆成独立函数，便于与 edge_tts 7.x
+    的 cues 聚合逻辑共享同一套断句匹配与落盘流程。
+    """
+    formatter = _build_subtitle_formatter()
+    start_time = -1.0
+    sub_items = []
+    sub_index = 0
+    sub_line = ""
+
+    legacy_offsets = getattr(sub_maker, "offset", [])
+    legacy_subs = getattr(sub_maker, "subs", [])
+    for _, (offset, sub) in enumerate(zip(legacy_offsets, legacy_subs)):
+        current_start_time, current_end_time = offset
+        if start_time < 0:
+            start_time = current_start_time
+
+        sub_line += unescape(sub)
+        matched_text = _match_script_line(script_lines, sub_line, sub_index)
+        if not matched_text:
+            continue
+
+        sub_index += 1
+        sub_items.append(
+            formatter(
+                idx=sub_index,
+                start_time=start_time,
+                end_time=current_end_time,
+                sub_text=matched_text,
+            )
+        )
+        start_time = -1.0
+        sub_line = ""
+
+    if sub_line.strip():
+        logger.warning(
+            f"legacy subtitle items still have unmatched text after aggregation: {sub_line}"
+        )
+
+    return sub_items
 
 
 def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
@@ -1730,207 +1681,67 @@ def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
     2. 逐行匹配字幕文件中的文本
     3. 生成新的字幕文件
     """
-
     text = _format_text(text)
-
-    def formatter(idx: int, start_time: float, end_time: float, sub_text: str) -> str:
-        """
-        1
-        00:00:00,000 --> 00:00:02,360
-        跑步是一项简单易行的运动
-        """
-        start_t = mktimestamp(start_time).replace(".", ",")
-        end_t = mktimestamp(end_time).replace(".", ",")
-        return f"{idx}\n{start_t} --> {end_t}\n{sub_text}\n"
-
-    start_time = -1.0
-    sub_items = []
-    sub_index = 0
-
     script_lines = utils.split_string_by_punctuations(text)
-
-    def match_line(_sub_line: str, _sub_index: int):
-        if len(script_lines) <= _sub_index:
-            return ""
-
-        _line = script_lines[_sub_index]
-        if _sub_line == _line:
-            return script_lines[_sub_index].strip()
-
-        _sub_line_ = re.sub(r"[^\w\s]", "", _sub_line)
-        _line_ = re.sub(r"[^\w\s]", "", _line)
-        if _sub_line_ == _line_:
-            return _line_.strip()
-
-        _sub_line_ = re.sub(r"\W+", "", _sub_line)
-        _line_ = re.sub(r"\W+", "", _line)
-        if _sub_line_ == _line_:
-            return _line.strip()
-
-        return ""
-
-    sub_line = ""
-
     try:
-        for _, (offset, sub) in enumerate(zip(sub_maker.offset, sub_maker.subs)):
-            _start_time, end_time = offset
-            if start_time < 0:
-                start_time = _start_time
-
-            sub = unescape(sub)
-            sub_line += sub
-            sub_text = match_line(sub_line, sub_index)
-            if sub_text:
-                sub_index += 1
-                line = formatter(
-                    idx=sub_index,
-                    start_time=start_time,
-                    end_time=end_time,
-                    sub_text=sub_text,
-                )
-                sub_items.append(line)
-                start_time = -1.0
-                sub_line = ""
-
-        if len(sub_items) == len(script_lines):
-            with open(subtitle_file, "w", encoding="utf-8") as file:
-                file.write("\n".join(sub_items) + "\n")
-            try:
-                from moviepy.video.tools import subtitles
-                sbs = subtitles.file_to_subtitles(subtitle_file, encoding="utf-8")
-                duration = max([tb for ((ta, tb), txt) in sbs])
-                logger.info(
-                    f"completed, subtitle file created: {subtitle_file}, duration: {duration}"
-                )
-            except Exception as e:
-                logger.error(f"failed, error: {str(e)}")
-                os.remove(subtitle_file)
+        if hasattr(sub_maker, "cues") and sub_maker.cues:
+            sub_items = _build_subtitle_items_from_edge_cues(sub_maker, script_lines)
         else:
+            sub_items = _build_subtitle_items_from_legacy_submaker(
+                sub_maker, script_lines
+            )
+
+        if len(sub_items) != len(script_lines):
             logger.warning(
                 f"failed, sub_items len: {len(sub_items)}, script_lines len: {len(script_lines)}"
             )
+            return
 
+        _write_subtitle_items(sub_items, subtitle_file)
     except Exception as e:
         logger.error(f"failed, error: {str(e)}")
-
-def create_ass_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str, params: dict = None):
-    if params is None:
-        params = {}
-        
-    font_name = params.get("font_name", "Arial")
-    font_size = int(params.get("font_size", 60))
-    primary_color = "&HFFFFFF&" 
-    highlight_color = "&H00FFFF&" 
-    stroke_color = "&H000000&" 
-    stroke_width = int(params.get("stroke_width", 3))
-
-    ass_content = [
-        "[Script Info]",
-        "ScriptType: v4.00+",
-        "WrapStyle: 1",
-        "ScaledBorderAndShadow: yes",
-        "",
-        "[V4+ Styles]",
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,{font_name},{font_size},{primary_color},&H000000FF,{stroke_color},&H80000000,1,0,0,0,100,100,0,0,1,{stroke_width},0,2,10,10,60,1", 
-        "",
-        "[Events]",
-        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
-    ]
-
-    def to_ass_time(ms):
-        h = int(ms // 3600000)
-        ms %= 3600000
-        m = int(ms // 60000)
-        ms %= 60000
-        s = int(ms // 1000)
-        cs = int((ms % 1000) // 10)
-        return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
-
-    try:
-        from html import unescape
-        dialogues = []
-        for offset, sub in zip(sub_maker.offset, sub_maker.subs):
-            start_time, end_time = offset
-            if start_time < 0:
-                 continue
-            
-            sub = unescape(sub).strip()
-            if not sub:
-                continue
-                
-            start_ms = start_time / 10000.0
-            end_ms = end_time / 10000.0
-            total_time = end_ms - start_ms
-            
-            words = sub.replace("\n", " ").split()
-            if not words: continue
-            
-            total_chars = sum(len(w) for w in words)
-            
-            current_ms = start_ms
-            for i, active_word in enumerate(words):
-                word_duration = total_time * (len(active_word) / total_chars) if total_chars > 0 else total_time / len(words)
-                word_end_ms = current_ms + word_duration
-                
-                line_words = []
-                for j, w in enumerate(words):
-                    if j == i:
-                        line_words.append(fr"{{\c{highlight_color}\fscx115\fscy115}}{w}{{\c{primary_color}\fscx100\fscy100}}")
-                    else:
-                        line_words.append(w)
-                
-                colored_text = " ".join(line_words)
-                dialogue = f"Dialogue: 0,{to_ass_time(current_ms)},{to_ass_time(word_end_ms)},Default,,0,0,0,,{colored_text}"
-                dialogues.append(dialogue)
-                
-                current_ms = word_end_ms
-                
-        ass_content.extend(dialogues)
-
-        with open(subtitle_file, "w", encoding="utf-8") as file:
-            file.write("\n".join(ass_content) + "\n")
-            
-        logger.info(f"completed, Hormozi ASS subtitle file created: {subtitle_file}")
-    except Exception as e:
-        logger.error(f"failed to create ASS subtitle: {str(e)}")
 
 
 def _get_audio_duration_from_submaker(sub_maker: SubMaker):
     """
     获取音频时长
     """
-    if not sub_maker.offset:
-        return 0.0
-    return sub_maker.offset[-1][1] / 10000000
+    # 优先兼容 edge_tts 7.x 的 cues 结构；
+    # 如果是项目里其他 TTS 手工填充的旧结构，则继续读取 offset。
+    if hasattr(sub_maker, "cues") and sub_maker.cues:
+        return sub_maker.cues[-1].end.total_seconds()
 
-def _get_audio_duration_from_mp3(mp3_file: str) -> float:
+    legacy_offsets = getattr(sub_maker, "offset", [])
+    if not legacy_offsets:
+        return 0.0
+    return legacy_offsets[-1][1] / 10000000
+
+def _get_audio_duration_from_file(audio_file: str) -> float:
     """
-    获取MP3音频时长
+    获取音频文件时长（支持 mp3/m4a/wav/aac 等 ffmpeg 可解码的格式）
     """
-    if not os.path.exists(mp3_file):
-        logger.error(f"MP3 file does not exist: {mp3_file}")
+    if not os.path.exists(audio_file):
+        logger.error(f"audio file does not exist: {audio_file}")
         return 0.0
 
     try:
-        from moviepy.audio.io.AudioFileClip import AudioFileClip
-        # Use moviepy to get the duration of the MP3 file
-        with AudioFileClip(mp3_file) as audio:
+        # Use moviepy (ffmpeg) to read the duration of any supported audio format
+        with AudioFileClip(audio_file) as audio:
             return audio.duration  # Duration in seconds
     except Exception as e:
-        logger.error(f"Failed to get audio duration from MP3: {str(e)}")
+        logger.error(f"Failed to get audio duration from file: {str(e)}")
         return 0.0
 
-def get_audio_duration( target: Union[str, SubMaker]) -> float:
+def get_audio_duration(target: Union[str, SubMaker]) -> float:
     """
     获取音频时长
     如果是SubMaker对象，则从SubMaker中获取时长
-    如果是MP3文件，则从MP3文件中获取时长
+    如果是音频文件路径，则从音频文件中获取时长（支持 mp3/m4a/wav 等格式）
     """
     if isinstance(target, SubMaker):
         return _get_audio_duration_from_submaker(target)
-    elif isinstance(target, str) and target.endswith(".mp3"):
-        return _get_audio_duration_from_mp3(target)
+    elif isinstance(target, str):
+        return _get_audio_duration_from_file(target)
     else:
         logger.error(f"Invalid target type: {type(target)}")
         return 0.0

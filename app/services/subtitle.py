@@ -178,6 +178,13 @@ def file_to_subtitles(filename):
                 current_times, current_text = None, ""
             elif current_times:
                 current_text += line
+
+    # Flush the final block. SRT files whose last subtitle is not followed by a
+    # trailing blank line never hit the blank-line branch above, so without this
+    # the last subtitle would be silently dropped.
+    if current_times:
+        index += 1
+        times_texts.append((index, current_times.strip(), current_text.strip()))
     return times_texts
 
 
@@ -234,7 +241,8 @@ def correct(subtitle_file, video_script, audio_duration: float = 0.0):
     2. Global drift correction — scale all timestamps if they end too early.
     """
     subtitle_items = file_to_subtitles(subtitle_file)
-    script_lines = utils.split_string_by_punctuations(video_script)
+    normalized_script = utils.normalize_script_for_subtitle_matching(video_script)
+    script_lines = utils.split_string_by_punctuations(normalized_script)
 
     if not subtitle_items or not script_lines:
         return

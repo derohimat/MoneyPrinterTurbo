@@ -1,5 +1,6 @@
 .DS_Store
 /config.toml
+/config.toml.bak
 /storage/
 /.idea/
 /app/services/__pycache__
@@ -42,6 +43,7 @@ tasks_*.json
 test_*.log
 test_video_gen.py
 batch_run_category.py
+
 # Test artifacts
 output_tier*/
 *.temp.mp3
@@ -49,3 +51,12 @@ output_tier*/
 test.mp3
 test_v7.mp3
 verify.mp3
+
+!test/services/test_*.py
+!test/test_*.py
+.coverage
+coverage.xml
+htmlcov/
+.codegraph
+/docs/superpowers
+.understand-anything

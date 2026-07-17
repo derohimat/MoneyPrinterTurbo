@@ -1,23 +1,37 @@
 import os
-import re
 import random
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, List, Optional, Tuple
+import threading
+from typing import List
 from urllib.parse import urlencode
 
 import requests
 from loguru import logger
 from moviepy.video.io.VideoFileClip import VideoFileClip
-from moviepy.video.VideoClip import ImageClip
 
 from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
 from app.utils import utils
-from app.utils import utils
-from app.utils import video_scorer
-from app.utils import rate_limiter
 
-requested_count = 0
+# Thread-safe counter for API key rotation
+_api_key_counter = 0
+_api_key_lock = threading.Lock()
+
+
+def _get_tls_verify() -> bool:
+    # 默认开启 TLS 证书校验，防止素材搜索和下载过程被中间人篡改。
+    # 仅在企业代理、自签证书等明确需要的场景下，允许用户通过
+    # `config.toml` 显式设置 `tls_verify = false` 临时关闭。
+    tls_verify = config.app.get("tls_verify", True)
+    if isinstance(tls_verify, str):
+        tls_verify = tls_verify.strip().lower() not in ("0", "false", "no", "off")
+
+    if not tls_verify:
+        logger.warning(
+            "TLS certificate verification is disabled by config.app.tls_verify=false. "
+            "Only use this in trusted proxy environments."
+        )
+
+    return bool(tls_verify)
 
 
 def get_api_key(cfg_key: str):
@@ -32,80 +46,16 @@ def get_api_key(cfg_key: str):
     if isinstance(api_keys, str):
         return api_keys
 
-    global requested_count
-    requested_count += 1
-    return api_keys[requested_count % len(api_keys)]
-
-
-
-GENERIC_TERMS = {
-    "background", "view", "scene", "video", "clip", "stock", "footage", 
-    "hd", "4k", "sky", "blue", "white", "black", "green", "red",
-    "nature", "landscape", "people", "happy", "person", "man", "woman",
-    "girl", "boy", "day", "night", "light", "dark", "slow", "motion"
-}
-def validate_video_metadata(video_tags: List[str], video_title: str, search_term: str) -> Tuple[bool, str]:
-    """
-    Validates if the video metadata matches the search term strictly.
-    Returns (is_valid, reason)
-    """
-    # List of safe words that shouldn't independently define a match 
-    # if combined with strong nouns (like "city", "building")
-    GENERIC_TERMS_EXTENDED = GENERIC_TERMS.union({
-        "city", "building", "street", "architecture", "monument", "ancient"
-    })
-    
-    search_tokens = [t.strip().lower() for t in search_term.split()]
-    # Filter out generic terms to find 'specific' keywords (the core nouns)
-    specific_tokens = [t for t in search_tokens if t not in GENERIC_TERMS_EXTENDED and len(t) > 2]
-    
-    # If all tokens were filtered out (e.g. search was exactly "ancient city"), 
-    # fall back to the original generic terms so we can still match *something*.
-    validation_tokens = specific_tokens if specific_tokens else search_tokens
-    
-    # We require AT LEAST ONE specific token to be present in the title OR tags.
-    # The LLM now generates 1-3 noun clusters (e.g., "Kaaba Mecca Pilgrims").
-    # If Pexels returns a video tagged "Kaaba", that's a valid hit.
-    
-    found_match = False
-    matched_token = ""
-    
-    # 1. Check title/slug (Pexels URLs usually contain the title slug)
-    title_lower = video_title.lower()
-    for token in validation_tokens:
-        if token in title_lower:
-            found_match = True
-            matched_token = token
-            break
-            
-    if not found_match:
-        # 2. Check tags
-        for tag in video_tags:
-            tag_lower = tag.lower()
-            for token in validation_tokens:
-                # Use word boundaries or simple sub-string
-                if token in tag_lower or tag_lower in token:
-                    found_match = True
-                    matched_token = token
-                    break
-            if found_match:
-                break
-                
-    if found_match:
-        return True, f"Matched '{matched_token}'"
-    else:
-        # If we failed the strong metadata check, we can still accept the video 
-        # IF Pexels' search algorithm decided it was highly relevant (Trust Pexels).
-        # We'll log a warning but STILL PASS IT to prevent empty video generation.
-        logger.warning(f"Lenient Pass: Pexels provided video without strict metadata match for {validation_tokens}")
-        return True, "Lenient fallback pass"
+    global _api_key_counter
+    with _api_key_lock:
+        _api_key_counter += 1
+        return api_keys[_api_key_counter % len(api_keys)]
 
 
 def search_videos_pexels(
     search_term: str,
     minimum_duration: int,
     video_aspect: VideoAspect = VideoAspect.portrait,
-    negative_terms: List[str] = None,
 ) -> List[MaterialInfo]:
     aspect = VideoAspect(video_aspect)
     video_orientation = aspect.name
@@ -118,17 +68,14 @@ def search_videos_pexels(
     # Build URL
     params = {"query": search_term, "per_page": 20, "orientation": video_orientation}
     query_url = f"https://api.pexels.com/videos/search?{urlencode(params)}"
-    query_url = f"https://api.pexels.com/videos/search?{urlencode(params)}"
     logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
-
-    rate_limiter.pexels.wait()
 
     try:
         r = requests.get(
             query_url,
             headers=headers,
             proxies=config.proxy,
-            verify=False,
+            verify=_get_tls_verify(),
             timeout=(30, 60),
         )
         response = r.json()
@@ -139,42 +86,6 @@ def search_videos_pexels(
         videos = response["videos"]
         # loop through each video in the result
         for v in videos:
-            # check for negative terms
-            if negative_terms:
-                should_skip = False
-                # Pexels video object has 'url' which often contains the title/slug
-                # e.g. https://www.pexels.com/video/a-person-praying-12345/
-                video_url_slug = v.get("url", "").lower()
-                # Check tags if available (Pexels API response usually contains tags in 'tags' list or just keywords in url)
-                # Pexels 'tags' field is list of strings
-                video_tags = [t.lower() for t in v.get("tags", [])]
-                
-                for term in negative_terms:
-                    term = term.lower()
-                    if term in video_url_slug:
-                        should_skip = True
-                        break
-                    for tag in video_tags:
-                        if term in tag:
-                            should_skip = True
-                            break
-                    if should_skip:
-                        break
-                
-                if should_skip:
-                    logger.warning(f"Skipping video due to negative term: {v.get('url')}")
-                    continue
-
-                # STRICT METADATA VALIDATION
-                # Extract subject/keywords
-                video_url_slug = v.get("url", "").lower()
-                video_tags = [t.lower() for t in v.get("tags", [])]
-                
-                is_valid, reason = validate_video_metadata(video_tags, video_url_slug, search_term)
-                if not is_valid:
-                    logger.warning(f"Skipping video due to metadata mismatch: {v.get('url')} | Reason: {reason}")
-                    continue
-
             duration = v["duration"]
             # check if video has desired minimum duration
             if duration < minimum_duration:
@@ -198,60 +109,10 @@ def search_videos_pexels(
     return []
 
 
-def search_images_pexels(
-    search_term: str,
-    video_aspect: VideoAspect = VideoAspect.portrait,
-) -> List[MaterialInfo]:
-    aspect = VideoAspect(video_aspect)
-    video_orientation = aspect.name
-    api_key = get_api_key("pexels_api_keys")
-    headers = {
-        "Authorization": api_key,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-    }
-    
-    params = {"query": search_term, "per_page": 10, "orientation": video_orientation}
-    query_url = f"https://api.pexels.com/v1/search?{urlencode(params)}"
-    logger.info(f"searching fallback images: {query_url}")
-
-    rate_limiter.pexels.wait()
-
-    try:
-        r = requests.get(
-            query_url,
-            headers=headers,
-            proxies=config.proxy,
-            verify=False,
-            timeout=(30, 60),
-        )
-        response = r.json()
-        image_items = []
-        if "photos" not in response:
-            logger.error(f"search images failed: {response}")
-            return image_items
-            
-        photos = response["photos"]
-        for p in photos:
-            # Get the large high-res version
-            url = p.get("src", {}).get("large2x") or p.get("src", {}).get("large")
-            if url:
-                item = MaterialInfo()
-                item.provider = "pexels_image"
-                item.url = url
-                item.duration = 5.0 # Fixed duration since it's an image
-                image_items.append(item)
-                
-        return image_items
-    except Exception as e:
-        logger.error(f"search images failed: {str(e)}")
-
-    return []
-
 def search_videos_pixabay(
     search_term: str,
     minimum_duration: int,
     video_aspect: VideoAspect = VideoAspect.portrait,
-    negative_terms: List[str] = None,
 ) -> List[MaterialInfo]:
     aspect = VideoAspect(video_aspect)
 
@@ -266,14 +127,11 @@ def search_videos_pixabay(
         "key": api_key,
     }
     query_url = f"https://pixabay.com/api/videos/?{urlencode(params)}"
-    query_url = f"https://pixabay.com/api/videos/?{urlencode(params)}"
     logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
-
-    rate_limiter.pixabay.wait()
 
     try:
         r = requests.get(
-            query_url, proxies=config.proxy, verify=False, timeout=(30, 60)
+            query_url, proxies=config.proxy, verify=_get_tls_verify(), timeout=(30, 60)
         )
         response = r.json()
         video_items = []
@@ -283,32 +141,6 @@ def search_videos_pixabay(
         videos = response["hits"]
         # loop through each video in the result
         for v in videos:
-            # check for negative terms
-            if negative_terms:
-                should_skip = False
-                # Pixabay 'tags' is a comma-separated string
-                video_tags = v.get("tags", "").lower()
-                video_page_url = v.get("pageURL", "").lower()
-
-                for term in negative_terms:
-                    term = term.lower()
-                    if term in video_tags or term in video_page_url:
-                        should_skip = True
-                        break
-                
-                if should_skip:
-                    logger.warning(f"Skipping video due to negative term: {v.get('pageURL')}")
-                    continue
-
-                # STRICT METADATA VALIDATION
-                video_title = v.get("pageURL", "").lower()
-                video_tags = [t.strip().lower() for t in v.get("tags", "").split(",")]
-                
-                is_valid, reason = validate_video_metadata(video_tags, video_title, search_term)
-                if not is_valid:
-                    logger.warning(f"Skipping video due to metadata mismatch: {v.get('pageURL')} | Reason: {reason}")
-                    continue
-
             duration = v["duration"]
             # check if video has desired minimum duration
             if duration < minimum_duration:
@@ -332,143 +164,94 @@ def search_videos_pixabay(
 
     return []
 
-def search_images_pixabay(
+
+def search_videos_coverr(
     search_term: str,
+    minimum_duration: int,
     video_aspect: VideoAspect = VideoAspect.portrait,
 ) -> List[MaterialInfo]:
-    aspect = VideoAspect(video_aspect)
-    api_key = get_api_key("pixabay_api_keys")
-    
-    # Determine orientation equivalent for Pixabay
-    orientation = "vertical" if aspect == VideoAspect.portrait else "horizontal" if aspect == VideoAspect.landscape else "all"
+    """
+    Coverr (https://coverr.co) - free HD/4K stock videos,
+    subject to Coverr license terms (https://coverr.co/license).
 
+    Coverr API notes (based on official docs at api.coverr.co/docs/):
+      - 鉴权: Authorization: Bearer <api_key>
+      - 搜索端点: GET /videos?query=...,响应结构 {"hits": [...], ...}
+      - 加 ?urls=true 在搜索响应里直接返回 mp4 直链
+      - URL 是 signed JWT(绑定 API key,无过期时间)
+      - Coverr 库以 16:9 横屏为主,9:16 portrait 占比极低(约 1%)
+        因此本函数不做 aspect_ratio 过滤,由下游 video.py 的
+        resize + letterbox 逻辑统一处理
+      - duration 字段同时存在 number 和 string 两种形态,本函数都接受
+
+    本函数使用 urls.mp4_download 字段作为下载地址 —— 按 Coverr 官方文档
+    (https://api.coverr.co/docs/videos/#download-a-video) 的说法,
+    GET 这个 URL 本身就被 Coverr 当作一次合法的 download 事件计入统计,
+    无需再调用 PATCH /videos/:id/stats/downloads。
+    """
+    api_key = get_api_key("coverr_api_keys")
+    headers = {"Authorization": f"Bearer {api_key}"}
     params = {
-        "q": search_term,
-        "image_type": "photo",
-        "orientation": orientation,
-        "per_page": 20,
-        "key": api_key,
+        "query": search_term,
+        "page_size": 20,
+        "urls": "true",
+        "sort": "popular",
     }
-    query_url = f"https://pixabay.com/api/?{urlencode(params)}"
-    logger.info(f"searching fallback images: {query_url}")
-
-    rate_limiter.pixabay.wait()
+    query_url = f"https://api.coverr.co/videos?{urlencode(params)}"
+    logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
 
     try:
         r = requests.get(
-            query_url, proxies=config.proxy, verify=False, timeout=(30, 60)
+            query_url,
+            headers=headers,
+            proxies=config.proxy,
+            verify=_get_tls_verify(),
+            timeout=(30, 60),
         )
         response = r.json()
-        image_items = []
-        if "hits" not in response:
-            logger.error(f"search images failed: {response}")
-            return image_items
-            
-        photos = response["hits"]
-        for p in photos:
-            # Prefer large image url
-            url = p.get("largeImageURL") or p.get("webformatURL")
-            if url:
-                item = MaterialInfo()
-                item.provider = "pixabay_image"
-                item.url = url
-                item.duration = 5.0 # Fixed duration for images
-                image_items.append(item)
-                
-        return image_items
-    except Exception as e:
-        logger.error(f"search images failed: {str(e)}")
+        video_items: List[MaterialInfo] = []
 
-    return []
+        if not isinstance(response, dict) or "hits" not in response:
+            logger.error(f"search videos failed: {response}")
+            return video_items
 
+        for v in response["hits"]:
+            # duration 在不同响应里可能是 number(11.625) 或 string("10.500000")
+            try:
+                duration = int(float(v.get("duration") or 0))
+            except (TypeError, ValueError):
+                continue
+            if duration < minimum_duration:
+                continue
 
-def generate_image_gemini(search_term: str, video_aspect: VideoAspect = VideoAspect.portrait) -> List[MaterialInfo]:
-    try:
-        import google.generativeai as genai
-        import tempfile
-        import os
-        from app.utils import md5
-        
-        api_key = config.app.get("gemini_api_key", "")
-        if not api_key:
-            logger.error("Gemini API key is not set, cannot generate image fallback.")
-            return []
-            
-        genai.configure(api_key=api_key)
-        # Using imagen-3.0-generate-001 or gemini-1.5-pro fallback? 
-        # Actually Google Generative AI Python SDK uses model='imagen-3.0-generate-001'
-        # Let's try to generate the image
-        aspect = VideoAspect(video_aspect)
-        aspect_ratio = "9:16" if aspect == VideoAspect.portrait else "16:9" if aspect == VideoAspect.landscape else "1:1"
-        
-        prompt = f"Cinematic, highly detailed, photorealistic visual representation of: {search_term}. No text, no watermark, perfectly framed."
-        
-        logger.info(f"Generating image via Gemini Imagen for term: {search_term}")
-        
-        # NOTE: Imagen API might require allowlist. But we'll implement it according to docs.
-        try:
-            from google.generativeai.types import RequestOptions
-            result = genai.generate_image(
-                prompt=prompt,
-                number_of_images=1,
-                output_mime_type="image/jpeg",
-                aspect_ratio=aspect_ratio,
-                model="imagen-3.0-generate-001"
-            )
-        except Exception as api_err:
-            logger.error(f"Gemini generate_image failed: {str(api_err)}. Retrying with gemini-2.0-flash experimental output if applicable, or failing...")
-            raise api_err
-            
-        if result and len(result.images) > 0:
-            image = result.images[0]
-            # Save it to a temporary path, save_video will pick it up
-            temp_dir = utils.storage_dir("temp_images")
-            os.makedirs(temp_dir, exist_ok=True)
-            temp_path = os.path.join(temp_dir, f"gemini_{md5(search_term)}.jpg")
-            
-            # Using PIL image save method if available, or write raw bytes
-            if hasattr(image, '_pil_image'):
-                image._pil_image.save(temp_path)
-            elif hasattr(image, 'image') and hasattr(image.image, 'save'):
-                image.image.save(temp_path)
-            elif hasattr(image, 'content'):
-                with open(temp_path, "wb") as f:
-                    f.write(image.content)
-            else:
-                logger.error("Unknown image format returned from Gemini")
-                return []
-                
+            video_id = v.get("id")
+            mp4_download_url = (v.get("urls") or {}).get("mp4_download")
+            if not video_id or not mp4_download_url:
+                continue
+
             item = MaterialInfo()
-            item.provider = "gemini_image"
-            item.url = f"file://{temp_path}"
-            item.duration = 5.0
-            return [item]
+            item.provider = "coverr"
+            item.url = mp4_download_url
+            item.duration = duration
+            video_items.append(item)
+        return video_items
     except Exception as e:
-        logger.error(f"generate_image_gemini failed: {str(e)}")
+        logger.error(f"search videos failed: {str(e)}")
 
     return []
 
 
-def save_video(video_url: str, save_dir: str = "", search_term: str = "", provider: str = "") -> str:
+def save_video(video_url: str, save_dir: str = "") -> str:
     if not save_dir:
         save_dir = utils.storage_dir("cache_videos")
-
-    if search_term:
-        # Sanitize search term for directory name
-        safe_term = re.sub(r'[\\/*?:"<>|]', "", search_term).strip().replace(" ", "_")
-        save_dir = os.path.join(save_dir, safe_term)
 
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
     url_without_query = video_url.split("?")[0]
     url_hash = utils.md5(url_without_query)
-    
-    is_image = "image" in provider.lower()
-    
     video_id = f"vid-{url_hash}"
     video_path = f"{save_dir}/{video_id}.mp4"
-    image_path = f"{save_dir}/{video_id}.jpg"
 
     # if video already exists, return the path
     if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
@@ -479,42 +262,6 @@ def save_video(video_url: str, save_dir: str = "", search_term: str = "", provid
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
 
-    # If it's an image, download as image first then convert to 5s video
-    if is_image:
-        try:
-            if video_url.startswith("file://"):
-                import shutil
-                local_path = video_url.replace("file://", "")
-                shutil.copy2(local_path, image_path)
-            else:
-                with open(image_path, "wb") as f:
-                    f.write(
-                        requests.get(
-                            video_url,
-                            headers=headers,
-                            proxies=config.proxy,
-                            verify=False,
-                            timeout=(60, 240),
-                        ).content
-                    )
-            
-            logger.info(f"Downloaded fallback image, converting to 5s clip: {image_path}")
-            clip = ImageClip(image_path).set_duration(5.0)
-            # Write to the standard video_path
-            clip.write_videofile(video_path, fps=30, codec="libx264", audio=False, logger=None)
-            clip.close()
-            
-            # Clean up the raw image file
-            if os.path.exists(image_path):
-                os.remove(image_path)
-                
-            return video_path
-        except Exception as e:
-            logger.error(f"Failed to process and convert fallback image {video_url}: {e}")
-            if os.path.exists(video_path):
-                os.remove(video_path)
-            return ""
-
     # if video does not exist, download it
     with open(video_path, "wb") as f:
         f.write(
@@ -522,25 +269,35 @@ def save_video(video_url: str, save_dir: str = "", search_term: str = "", provid
                 video_url,
                 headers=headers,
                 proxies=config.proxy,
-                verify=False,
+                verify=_get_tls_verify(),
                 timeout=(60, 240),
             ).content
         )
 
     if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+        clip = None
         try:
             clip = VideoFileClip(video_path)
             duration = clip.duration
             fps = clip.fps
-            clip.close()
             if duration > 0 and fps > 0:
                 return video_path
         except Exception as e:
+            logger.warning(f"invalid video file: {video_path} => {str(e)}")
             try:
                 os.remove(video_path)
-            except Exception:
-                pass
-            logger.warning(f"invalid video file: {video_path} => {str(e)}")
+            except Exception as remove_error:
+                logger.warning(
+                    f"failed to remove invalid video file: {video_path}, error: {str(remove_error)}"
+                )
+        finally:
+            if clip is not None:
+                try:
+                    clip.close()
+                except Exception as close_error:
+                    logger.warning(
+                        f"failed to close video clip: {video_path}, error: {str(close_error)}"
+                    )
     return ""
 
 
@@ -549,180 +306,171 @@ def download_videos(
     search_terms: List[str],
     source: str = "pexels",
     video_aspect: VideoAspect = VideoAspect.portrait,
-    video_contact_mode: VideoConcatMode = VideoConcatMode.random,
+    video_concat_mode: VideoConcatMode = VideoConcatMode.random,
     audio_duration: float = 0.0,
     max_clip_duration: int = 5,
-    negative_terms: List[str] = None,
+    match_script_order: bool = False,
 ) -> List[str]:
-    valid_video_items = []
-    valid_video_urls = []
-    found_duration = 0.0
+    search_videos = search_videos_pexels
+    if source == "pixabay":
+        search_videos = search_videos_pixabay
+    elif source == "coverr":
+        search_videos = search_videos_coverr
 
-    # Build local cache directory to check for categorized videos
     material_directory = config.app.get("material_directory", "").strip()
     if material_directory == "task":
-        material_directory = utils.storage_dir("cache_videos")
+        material_directory = utils.task_dir(task_id)
     elif material_directory and not os.path.isdir(material_directory):
         material_directory = ""
 
-    # Before querying APIs, search our categorized local cache
-    cached_video_paths = []
-    if material_directory:
-        for search_term in search_terms:
-            safe_term = re.sub(r'[\\/*?:"<>|]', "", search_term).strip().replace(" ", "_")
-            term_dir = os.path.join(material_directory, safe_term)
-            if os.path.isdir(term_dir):
-                logger.info(f"checking local cache for term '{search_term}' in {term_dir}")
-                for filename in os.listdir(term_dir):
-                    if filename.endswith(".mp4"):
-                        filepath = os.path.join(term_dir, filename)
-                        if os.path.getsize(filepath) > 0:
-                            try:
-                                clip = VideoFileClip(filepath)
-                                duration = clip.duration
-                                fps = clip.fps
-                                clip.close()
-                                if duration > 0 and fps > 0:
-                                    item = MaterialInfo()
-                                    item.provider = "local_cache"
-                                    item.url = filepath  # Pretend filepath is the URL so it gets treated identically
-                                    item.duration = duration
-                                    item.search_term = search_term
-                                    
-                                    if item.url not in valid_video_urls:
-                                        valid_video_items.append(item)
-                                        valid_video_urls.append(item.url)
-                                        found_duration += item.duration
-                                        cached_video_paths.append(filepath)
-                            except Exception as e:
-                                logger.warning(f"invalid cached video file: {filepath} => {str(e)}")
+    if match_script_order:
+        return _download_videos_by_script_order(
+            task_id=task_id,
+            search_terms=search_terms,
+            search_videos=search_videos,
+            video_aspect=video_aspect,
+            audio_duration=audio_duration,
+            max_clip_duration=max_clip_duration,
+            material_directory=material_directory,
+        )
 
-        if found_duration >= audio_duration:
-            logger.success(f"enough footage found purely from local cache ({found_duration:.0f}s >= {audio_duration:.0f}s)")
-            
-    # Determine primary and fallback search functions ONLY IF we need more duration
-    if found_duration < audio_duration:
-        if source == "pixabay":
-            search_sources = [("pixabay", search_videos_pixabay), ("pexels", search_videos_pexels)]
-        else:
-            search_sources = [("pexels", search_videos_pexels), ("pixabay", search_videos_pixabay)]
+    valid_video_items = []
+    valid_video_urls = []
+    found_duration = 0.0
+    for search_term in search_terms:
+        video_items = search_videos(
+            search_term=search_term,
+            minimum_duration=max_clip_duration,
+            video_aspect=video_aspect,
+        )
+        logger.info(f"found {len(video_items)} videos for '{search_term}'")
 
-        for source_name, search_videos in search_sources:
-            for term_idx, search_term in enumerate(search_terms):
-                video_items = search_videos(
-                    search_term=search_term,
-                    minimum_duration=max_clip_duration,
-                    video_aspect=video_aspect,
-                    negative_terms=negative_terms,
-                )
-                logger.info(f"found {len(video_items)} videos for '{search_term}' from {source_name}")
-
-                # [IMAGE FALLBACK LOGIC]: If the search failed, and it's our critical hook term, get an image
-                if not video_items and term_idx == 0:
-                    logger.warning(f"No videos found for Hook Term '{search_term}'. Falling back to Gemini Image generation...")
-                    video_items = generate_image_gemini(search_term, video_aspect)
-                    
-                    if not video_items:
-                        logger.warning("Gemini image fallback failed, falling back to Pexels/Pixabay images...")
-                        if source_name == "pexels":
-                            video_items = search_images_pexels(search_term, video_aspect)
-                        else:
-                            video_items = search_images_pixabay(search_term, video_aspect)
-                    
-                    if video_items:
-                        logger.success(f"Successfully rescued Hook with {len(video_items)} cinematic images from {source_name}")
-                
-                for item in video_items:
-                    # Give it the search sequence so we know which categorized folder to save it to later
-                    item.search_term = search_term
-
-                    if item.url not in valid_video_urls:
-                        valid_video_items.append(item)
-                        valid_video_urls.append(item.url)
-                        found_duration += item.duration
-
-            # Check if we have enough footage from primary source
-            if found_duration >= audio_duration:
-                logger.info(f"sufficient footage found from {source_name} ({found_duration:.0f}s >= {audio_duration:.0f}s), skipping fallback")
-                break
-            else:
-                logger.warning(f"insufficient footage from {source_name} ({found_duration:.0f}s < {audio_duration:.0f}s), trying next source...")
+        for item in video_items:
+            if item.url not in valid_video_urls:
+                valid_video_items.append(item)
+                valid_video_urls.append(item.url)
+                found_duration += item.duration
 
     logger.info(
         f"found total videos: {len(valid_video_items)}, required duration: {audio_duration} seconds, found duration: {found_duration} seconds"
     )
-    video_paths = cached_video_paths.copy() # Start out with the ones that are legally filepaths
+    video_paths = []
 
-    # IMPORTANT: The user hook needs the FIRST video to be highly relevant to the primary subject. 
-    # If using random concat mode, we must secure at least one primary video at index 0.
-    if video_contact_mode.value == VideoConcatMode.random.value and valid_video_items:
-        primary_term = search_terms[0] if search_terms else ""
-        
-        # 1. Find the best primary candidate
-        primary_candidate_idx = -1
-        for i, item in enumerate(valid_video_items):
-            if getattr(item, 'search_term', "") == primary_term:
-                primary_candidate_idx = i
-                break
-                
-        if primary_candidate_idx != -1:
-            # Pop the primary candidate
-            primary_vid = valid_video_items.pop(primary_candidate_idx)
-            # Shuffle the rest
-            random.shuffle(valid_video_items)
-            # Put the primary candidate back at the explicitly first position
-            valid_video_items.insert(0, primary_vid)
-            logger.info(f"Anchored highly-relevant video for '{primary_term}' to index 0 (Hook)")
-        else:
-            random.shuffle(valid_video_items)
-            
+    concat_mode_value = getattr(video_concat_mode, "value", video_concat_mode)
+    if concat_mode_value == VideoConcatMode.random.value:
+        random.shuffle(valid_video_items)
+
     total_duration = 0.0
-    
-    # We will submit tasks in small batches to avoid over-fetching and save bandwidth.
-    max_workers = 3
-    logger.info(f"Starting limited batch download/processing with {max_workers} workers")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        index = 0
-        while index < len(valid_video_items) and total_duration < audio_duration:
-            # Prepare a small batch
-            batch_items = valid_video_items[index:index + max_workers]
-            index += max_workers
-            
-            future_to_item = {}
-            for item in batch_items:
-                # If the item is ALREADY a local cache file, treat it as downloaded
-                if item.provider == "local_cache":
-                    # It's already in the cached_video_paths list from above, just need to tally the duration
-                    seconds = min(max_clip_duration, item.duration)
-                    total_duration += seconds
-                    logger.info(f"video used from local cache: {item.url}")
-                else:
-                    search_term = getattr(item, 'search_term', "") 
-                    provider = getattr(item, 'provider', "")
-                    future = executor.submit(save_video, video_url=item.url, save_dir=material_directory, search_term=search_term, provider=provider)
-                    future_to_item[future] = item
-            
-            for future in as_completed(future_to_item):
-                item = future_to_item[future]
-                try:
-                    saved_video_path = future.result()
-                    if saved_video_path:
-                        logger.info(f"video saved: {saved_video_path}")
-                        video_paths.append(saved_video_path)
-                        seconds = min(max_clip_duration, item.duration)
-                        total_duration += seconds
-                except Exception as e:
-                    logger.error(f"failed to download video: {utils.to_json(item)} => {str(e)}")
-                    
-            if total_duration >= audio_duration:
-                logger.info(f"total duration of downloaded videos: {total_duration}s meets required {audio_duration}s. Stopping download.")
-                break
-
-    logger.success(f"downloaded {len(video_paths)} videos (batch mode)")
-
-    # Apply quality scoring filter
-    if video_paths:
-        video_paths = video_scorer.filter_videos_by_quality(video_paths, min_score=60)
-
+    for item in valid_video_items:
+        try:
+            logger.info(f"downloading video: {item.url}")
+            saved_video_path = save_video(
+                video_url=item.url, save_dir=material_directory
+            )
+            if saved_video_path:
+                logger.info(f"video saved: {saved_video_path}")
+                video_paths.append(saved_video_path)
+                seconds = min(max_clip_duration, item.duration)
+                total_duration += seconds
+                if total_duration > audio_duration:
+                    logger.info(
+                        f"total duration of downloaded videos: {total_duration} seconds, skip downloading more"
+                    )
+                    break
+        except Exception as e:
+            logger.error(f"failed to download video: {utils.to_json(item)} => {str(e)}")
+    logger.success(f"downloaded {len(video_paths)} videos")
     return video_paths
+
+
+def _download_videos_by_script_order(
+    task_id: str,
+    search_terms: List[str],
+    search_videos,
+    video_aspect: VideoAspect,
+    audio_duration: float,
+    max_clip_duration: int,
+    material_directory: str,
+) -> List[str]:
+    """
+    按脚本文案顺序下载素材。
+
+    默认下载逻辑会把所有关键词的候选素材合并成一个大列表；如果第一个
+    关键词返回很多结果，最终下载时可能一直消耗这个关键词的素材，后续
+    脚本主题就排不上时间线。这里按关键词分组后轮询下载：
+    第 1 轮取每个关键词的第 1 个候选，第 2 轮取每个关键词的第 2 个候选。
+    这样在不重写视频合成引擎的前提下，尽量保证素材顺序贴近文案顺序。
+    """
+    logger.info("downloading videos with script-order material matching")
+    candidate_groups = []
+    valid_video_urls = set()
+    found_duration = 0.0
+
+    for search_term in search_terms:
+        video_items = search_videos(
+            search_term=search_term,
+            minimum_duration=max_clip_duration,
+            video_aspect=video_aspect,
+        )
+        logger.info(f"found {len(video_items)} videos for '{search_term}'")
+
+        term_items = []
+        for item in video_items:
+            if item.url in valid_video_urls:
+                continue
+            term_items.append(item)
+            valid_video_urls.add(item.url)
+            found_duration += item.duration
+
+        if term_items:
+            candidate_groups.append((search_term, term_items))
+
+    logger.info(
+        f"found total ordered video candidates: {sum(len(items) for _, items in candidate_groups)}, "
+        f"required duration: {audio_duration} seconds, found duration: {found_duration} seconds"
+    )
+
+    video_paths = []
+    total_duration = 0.0
+    candidate_index = 0
+    while candidate_groups and total_duration <= audio_duration:
+        has_candidate = False
+        for search_term, term_items in candidate_groups:
+            if candidate_index >= len(term_items):
+                continue
+
+            has_candidate = True
+            item = term_items[candidate_index]
+            try:
+                logger.info(
+                    f"downloading ordered video for '{search_term}': {item.url}"
+                )
+                saved_video_path = save_video(
+                    video_url=item.url, save_dir=material_directory
+                )
+                if saved_video_path:
+                    logger.info(f"video saved: {saved_video_path}")
+                    video_paths.append(saved_video_path)
+                    total_duration += min(max_clip_duration, item.duration)
+                    if total_duration > audio_duration:
+                        logger.info(
+                            f"total duration of downloaded videos: {total_duration} seconds, skip downloading more"
+                        )
+                        break
+            except Exception as e:
+                logger.error(
+                    f"failed to download ordered video: {utils.to_json(item)} => {str(e)}"
+                )
+
+        if not has_candidate:
+            break
+        candidate_index += 1
+
+    logger.success(f"downloaded {len(video_paths)} ordered videos")
+    return video_paths
+
+
+if __name__ == "__main__":
+    download_videos(
+        "test123", ["Money Exchange Medium"], audio_duration=100, source="pixabay"
+    )

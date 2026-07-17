@@ -1,328 +1,342 @@
-import hashlib
 import json
 import logging
 import re
-import time
-import requests
+from time import perf_counter
 from typing import List
 
-import g4f
 from loguru import logger
 from openai import AzureOpenAI, OpenAI
 from openai.types.chat import ChatCompletion
 
 from app.config import config
-from app.utils import llm_cache
+from app.models.llm_provider import DEFAULT_LLM_PROVIDER_ID, get_llm_provider
 
 _max_retries = 5
+MIN_SCRIPT_PARAGRAPH_NUMBER = 1
+MAX_SCRIPT_PARAGRAPH_NUMBER = 10
+MAX_SCRIPT_PROMPT_LENGTH = 2000
+MAX_SCRIPT_SYSTEM_PROMPT_LENGTH = 8000
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
+_UNCLOSED_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
+_URL_USERINFO_RE = re.compile(
+    r"((?:https?|wss?)://)([^/\s?#@]*:[^/\s?#@]*@)", re.IGNORECASE
+)
+_SENSITIVE_QUERY_RE = re.compile(
+    r"([?&](?:api[_-]?key|access[_-]?token|token|key|secret|password)=)([^&#\s]+)",
+    re.IGNORECASE,
+)
+
+DEFAULT_SCRIPT_SYSTEM_PROMPT = """
+# Role: Video Script Generator
+
+## Goals:
+Generate a script for a video, depending on the subject of the video.
+
+## Constrains:
+1. the script is to be returned as a string with the specified number of paragraphs.
+2. do not under any circumstance reference this prompt in your response.
+3. get straight to the point, don't start with unnecessary things like, "welcome to this video".
+4. you must not include any type of markdown or formatting in the script, never use a title.
+5. only return the raw content of the script.
+6. do not include "voiceover", "narrator" or similar indicators of what should be spoken at the beginning of each paragraph or line.
+7. you must not mention the prompt, or anything about the script itself. also, never talk about the amount of paragraphs or lines. just write the script.
+8. respond in the same language as the video subject.
+""".strip()
+
+
+def _normalize_text_response(content, llm_provider: str) -> str:
+    # 不同 LLM SDK 在异常或被拦截场景下，可能返回 None、空字符串，
+    # 甚至返回非字符串对象。这里统一做兜底校验，避免后续直接调用
+    # `.replace()` 时抛出 `NoneType` 之类的属性错误。
+    if content is None:
+        raise ValueError(f"[{llm_provider}] returned empty text content")
+
+    if not isinstance(content, str):
+        raise TypeError(
+            f"[{llm_provider}] returned non-text content: {type(content).__name__}"
+        )
+
+    # MiniMax M3、DeepSeek R1 这类 reasoning 模型可能会把内部推理包在
+    # `<think>...</think>` 中返回。视频脚本和关键词只需要最终可朗读文本，
+    # 如果不在服务层统一清理，WebUI、字幕和配音都会把思考过程当正文处理。
+    content = _THINK_BLOCK_RE.sub("", content)
+    content = _UNCLOSED_THINK_BLOCK_RE.sub("", content).strip()
+    if not content:
+        raise ValueError(f"[{llm_provider}] returned empty text content")
+
+    return content.replace("\n", "")
+
+
+def _sanitize_error_message(error: object) -> str:
+    """
+    清理返回给 WebUI/API 的错误信息，避免自定义 base_url 中的凭据泄露。
+
+    一些 OpenAI-compatible SDK 会把请求 URL 原样拼进异常信息。如果用户为了
+    代理网关配置了 `https://user:pass@example.com/v1`，直接返回 `str(e)`
+    就会把密码暴露给页面、API 调用方或后续日志。这里仅处理错误文案，不改变
+    实际请求地址，避免影响正常调用链路。
+    """
+    message = str(error)
+    message = _URL_USERINFO_RE.sub(r"\1***:***@", message)
+    message = _SENSITIVE_QUERY_RE.sub(r"\1***", message)
+    return message
+
+
+def _extract_chat_completion_text(response, llm_provider: str) -> str:
+    # OpenAI 兼容接口在异常场景下，可能返回没有 choices、
+    # 或者 choices/message/content 为空的响应对象。
+    # 这里统一做结构校验，避免出现 `NoneType is not subscriptable`
+    # 这类底层属性访问错误。
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise ValueError(f"[{llm_provider}] returned empty choices")
+
+    first_choice = choices[0]
+    message = getattr(first_choice, "message", None)
+    if message is None:
+        raise ValueError(f"[{llm_provider}] returned empty message")
+
+    content = getattr(message, "content", None)
+    return _normalize_text_response(content, llm_provider)
+
+
+def _get_response_field(value, key: str):
+    """兼容 dict 和 SDK 响应对象的字段读取。"""
+    if isinstance(value, dict):
+        return value.get(key)
+
+    try:
+        return value[key]
+    except (KeyError, TypeError, AttributeError):
+        return getattr(value, key, None)
+
+
+def _extract_qwen_generation_text(response) -> str:
+    """
+    从 DashScope Generation 响应中提取文本。
+
+    Qwen 使用 `messages` 调用时返回的是 chat 结构：
+    `output.choices[0].message.content`；旧 completion 形态才会返回
+    `output.text`。这里两个路径都兼容，避免 `output.text` 为 None 时
+    继续 `.replace()` 触发不可诊断的 AttributeError。
+    """
+    output = _get_response_field(response, "output")
+    choices = _get_response_field(output, "choices") if output else None
+    if choices is not None:
+        if not choices:
+            logger.warning("Qwen returned an empty choices list")
+            raise ValueError("[qwen] returned empty choices")
+
+        first_choice = choices[0]
+        message = _get_response_field(first_choice, "message")
+        content = _get_response_field(message, "content") if message else None
+        if content is not None:
+            return _normalize_text_response(content, "qwen")
+
+    text = _get_response_field(output, "text") if output else None
+    return _normalize_text_response(text, "qwen")
 
 
 def _generate_response(prompt: str) -> str:
     try:
-        content = ""
-        llm_provider = config.app.get("llm_provider", "openai")
+        llm_provider = str(
+            config.app.get("llm_provider", DEFAULT_LLM_PROVIDER_ID)
+        ).lower()
+        provider = get_llm_provider(llm_provider)
+        if provider is None:
+            raise ValueError(f"{llm_provider}: unsupported llm provider")
+
         logger.info(f"llm provider: {llm_provider}")
-        if llm_provider == "g4f":
-            model_name = config.app.get("g4f_model_name", "")
-            if not model_name:
-                model_name = "gpt-3.5-turbo-16k-0613"
-            content = g4f.ChatCompletion.create(
+        api_key = config.app.get(provider.config_key("api_key"), "")
+        configured_model = config.app.get(provider.config_key("model_name"), "")
+        model_name = provider.resolve_model_name(configured_model)
+        if configured_model and model_name != configured_model:
+            logger.warning(
+                f"{llm_provider} model '{configured_model}' is deprecated, "
+                f"fallback to '{model_name}'"
+            )
+        configured_base_url = config.app.get(provider.config_key("base_url"), "")
+        base_url = provider.resolve_base_url(configured_base_url)
+        if configured_base_url and configured_base_url.strip().rstrip("/") in {
+            url.rstrip("/") for url in provider.deprecated_base_urls
+        }:
+            logger.warning(
+                f"{llm_provider} base URL '{configured_base_url}' is deprecated, "
+                f"fallback to '{base_url}'"
+            )
+        adapter = provider.adapter
+        api_version = ""
+
+        # Ollama 的默认地址依赖当前是否运行在容器中，无法作为静态 Registry
+        # 值保存；Registry 仍负责模型和必填规则，运行环境差异在这里解析。
+        if llm_provider == "ollama":
+            api_key = "ollama"
+            if not base_url:
+                base_url = config.get_default_ollama_base_url()
+
+        if adapter == "azure":
+            api_version = config.app.get(
+                provider.config_key("api_version"), "2024-02-15-preview"
+            )
+
+        extra_values = {
+            field.config_suffix: (
+                config.app.get(provider.config_key(field.config_suffix), "")
+                or field.default_value
+            )
+            for field in provider.extra_fields
+        }
+
+        if provider.requires_api_key and not api_key:
+            raise ValueError(
+                f"{llm_provider}: api_key is not set, please set it in the config.toml file."
+            )
+        if provider.requires_model_name and not model_name:
+            raise ValueError(
+                f"{llm_provider}: model_name is not set, please set it in the config.toml file."
+            )
+        if provider.requires_base_url and not base_url:
+            raise ValueError(
+                f"{llm_provider}: base_url is not set, please set it in the config.toml file."
+            )
+
+        for field in provider.extra_fields:
+            if field.required and not extra_values[field.config_suffix]:
+                raise ValueError(
+                    f"{llm_provider}: {field.config_suffix} is not set, "
+                    "please set it in the config.toml file."
+                )
+
+        if adapter == "qwen":
+            import dashscope
+            from dashscope.api_entities.dashscope_response import GenerationResponse
+
+            dashscope.api_key = api_key
+            response = dashscope.Generation.call(
+                model=model_name, messages=[{"role": "user", "content": prompt}]
+            )
+            if response:
+                if isinstance(response, GenerationResponse):
+                    status_code = response.status_code
+                    if status_code != 200:
+                        raise Exception(
+                            f'[{llm_provider}] returned an error response: "{response}"'
+                        )
+
+                    return _extract_qwen_generation_text(response)
+                else:
+                    raise Exception(
+                        f'[{llm_provider}] returned an invalid response: "{response}"'
+                    )
+            else:
+                raise Exception(f"[{llm_provider}] returned an empty response")
+
+        if adapter == "gemini":
+            from google import genai
+            from google.genai import types
+
+            http_options = types.HttpOptions(base_url=base_url) if base_url else None
+            generation_config = types.GenerateContentConfig(
+                temperature=0.5,
+                top_p=1,
+                top_k=1,
+                max_output_tokens=2048,
+                safety_settings=[
+                    types.SafetySetting(
+                        category="HARM_CATEGORY_HARASSMENT",
+                        threshold="BLOCK_ONLY_HIGH",
+                    ),
+                    types.SafetySetting(
+                        category="HARM_CATEGORY_HATE_SPEECH",
+                        threshold="BLOCK_ONLY_HIGH",
+                    ),
+                    types.SafetySetting(
+                        category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                        threshold="BLOCK_ONLY_HIGH",
+                    ),
+                    types.SafetySetting(
+                        category="HARM_CATEGORY_DANGEROUS_CONTENT",
+                        threshold="BLOCK_ONLY_HIGH",
+                    ),
+                ],
+            )
+
+            try:
+                # 新版 google-genai 通过统一 Client 暴露模型服务。上下文管理器
+                # 会在请求结束后关闭底层 HTTP 连接，避免频繁生成时积累连接资源。
+                with genai.Client(
+                    api_key=api_key,
+                    http_options=http_options,
+                ) as client:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=generation_config,
+                    )
+                generated_text = response.text
+            except (AttributeError, IndexError, ValueError) as e:
+                logger.warning(f"gemini returned invalid response content: {str(e)}")
+                raise ValueError(f"[{llm_provider}] returned invalid response content")
+
+            return _normalize_text_response(generated_text, llm_provider)
+
+        if adapter == "cloudflare_ai_gateway":
+            account_id = extra_values["account_id"]
+            gateway_id = extra_values["gateway_id"]
+            # Cloudflare 当前推荐的 AI Gateway REST API 兼容 OpenAI SDK。
+            # Account ID 用于构造统一端点，Gateway ID 通过请求头选择；这里
+            # 不再调用 Workers AI 的 /ai/run/{model} 专用接口。
+            client = OpenAI(
+                api_key=api_key,
+                base_url=(
+                    f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
+                ),
+                default_headers={"cf-aig-gateway-id": gateway_id},
+            )
+            response = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": prompt}],
             )
-        else:
-            api_version = ""  # for azure
-            if llm_provider == "moonshot":
-                api_key = config.app.get("moonshot_api_key")
-                model_name = config.app.get("moonshot_model_name")
-                base_url = "https://api.moonshot.cn/v1"
-            elif llm_provider == "ollama":
-                # api_key = config.app.get("openai_api_key")
-                api_key = "ollama"  # any string works but you are required to have one
-                model_name = config.app.get("ollama_model_name")
-                base_url = config.app.get("ollama_base_url", "")
-                if not base_url:
-                    base_url = "http://localhost:11434/v1"
-            elif llm_provider == "openai":
-                api_key = config.app.get("openai_api_key")
-                model_name = config.app.get("openai_model_name")
-                base_url = config.app.get("openai_base_url", "")
-                if not base_url:
-                    base_url = "https://api.openai.com/v1"
-            elif llm_provider == "oneapi":
-                api_key = config.app.get("oneapi_api_key")
-                model_name = config.app.get("oneapi_model_name")
-                base_url = config.app.get("oneapi_base_url", "")
-            elif llm_provider == "azure":
-                api_key = config.app.get("azure_api_key")
-                model_name = config.app.get("azure_model_name")
-                base_url = config.app.get("azure_base_url", "")
-                api_version = config.app.get("azure_api_version", "2024-02-15-preview")
-            elif llm_provider == "gemini":
-                api_key = config.app.get("gemini_api_key")
-                model_name = config.app.get("gemini_model_name")
-                base_url = config.app.get("gemini_base_url", "")
-            elif llm_provider == "qwen":
-                api_key = config.app.get("qwen_api_key")
-                model_name = config.app.get("qwen_model_name")
-                base_url = "***"
-            elif llm_provider == "cloudflare":
-                api_key = config.app.get("cloudflare_api_key")
-                model_name = config.app.get("cloudflare_model_name")
-                account_id = config.app.get("cloudflare_account_id")
-                base_url = "***"
-            elif llm_provider == "deepseek":
-                api_key = config.app.get("deepseek_api_key")
-                model_name = config.app.get("deepseek_model_name")
-                base_url = config.app.get("deepseek_base_url")
-                if not base_url:
-                    base_url = "https://api.deepseek.com"
-            elif llm_provider == "sumopod":
-                api_key = config.app.get("sumopod_api_key")
-                model_name = config.app.get("sumopod_model_name")
-                base_url = config.app.get("sumopod_base_url", "")
-                if not base_url:
-                    base_url = "https://ai.sumopod.com/v1"
-            elif llm_provider == "modelscope":
-                api_key = config.app.get("modelscope_api_key")
-                model_name = config.app.get("modelscope_model_name")
-                base_url = config.app.get("modelscope_base_url")
-                if not base_url:
-                    base_url = "https://api-inference.modelscope.cn/v1/"
-            elif llm_provider == "ernie":
-                api_key = config.app.get("ernie_api_key")
-                secret_key = config.app.get("ernie_secret_key")
-                base_url = config.app.get("ernie_base_url")
-                model_name = "***"
-                if not secret_key:
-                    raise ValueError(
-                        f"{llm_provider}: secret_key is not set, please set it in the config.toml file."
-                    )
-            elif llm_provider == "pollinations":
-                try:
-                    base_url = config.app.get("pollinations_base_url", "")
-                    if not base_url:
-                        base_url = "https://text.pollinations.ai/openai"
-                    model_name = config.app.get("pollinations_model_name", "openai-fast")
-                   
-                    # Prepare the payload
-                    payload = {
-                        "model": model_name,
-                        "messages": [
-                            {"role": "user", "content": prompt}
-                        ],
-                        "seed": 101  # Optional but helps with reproducibility
-                    }
-                    
-                    # Optional parameters if configured
-                    if config.app.get("pollinations_private"):
-                        payload["private"] = True
-                    if config.app.get("pollinations_referrer"):
-                        payload["referrer"] = config.app.get("pollinations_referrer")
-                    
-                    headers = {
-                        "Content-Type": "application/json"
-                    }
-                    
-                    # Make the API request
-                    response = requests.post(base_url, headers=headers, json=payload)
-                    response.raise_for_status()
-                    result = response.json()
-                    
-                    if result and "choices" in result and len(result["choices"]) > 0:
-                        content = result["choices"][0]["message"]["content"]
-                        return content.replace("\n", "")
-                    else:
-                        raise Exception(f"[{llm_provider}] returned an invalid response format")
-                        
-                except requests.exceptions.RequestException as e:
-                    raise Exception(f"[{llm_provider}] request failed: {str(e)}")
-                except Exception as e:
-                    raise Exception(f"[{llm_provider}] error: {str(e)}")
+            return _extract_chat_completion_text(response, llm_provider)
 
-            if llm_provider not in ["pollinations", "ollama"]:  # Skip validation for providers that don't require API key
-                if not api_key:
-                    raise ValueError(
-                        f"{llm_provider}: api_key is not set, please set it in the config.toml file."
-                    )
-                if not model_name:
-                    raise ValueError(
-                        f"{llm_provider}: model_name is not set, please set it in the config.toml file."
-                    )
-                if not base_url and llm_provider not in ["gemini"]:
-                    raise ValueError(
-                        f"{llm_provider}: base_url is not set, please set it in the config.toml file."
-                    )
+        if adapter == "litellm":
+            import litellm
 
-            if llm_provider == "qwen":
-                import dashscope
-                from dashscope.api_entities.dashscope_response import GenerationResponse
-
-                dashscope.api_key = api_key
-                response = dashscope.Generation.call(
-                    model=model_name, messages=[{"role": "user", "content": prompt}]
-                )
-                if response:
-                    if isinstance(response, GenerationResponse):
-                        status_code = response.status_code
-                        if status_code != 200:
-                            raise Exception(
-                                f'[{llm_provider}] returned an error response: "{response}"'
-                            )
-
-                        content = response["output"]["text"]
-                        return content.replace("\n", "")
-                    else:
-                        raise Exception(
-                            f'[{llm_provider}] returned an invalid response: "{response}"'
-                        )
-                else:
-                    raise Exception(f"[{llm_provider}] returned an empty response")
-
-            if llm_provider == "gemini":
-                import google.generativeai as genai
-
-                if not base_url:
-                    genai.configure(api_key=api_key, transport="rest")
-                else:
-                    genai.configure(api_key=api_key, transport="rest", client_options={'api_endpoint': base_url})
-
-                generation_config = {
-                    "temperature": 0.5,
-                    "top_p": 1,
-                    "top_k": 1,
-                    "max_output_tokens": 2048,
-                }
-
-                safety_settings = [
-                    {
-                        "category": "HARM_CATEGORY_HARASSMENT",
-                        "threshold": "BLOCK_ONLY_HIGH",
-                    },
-                    {
-                        "category": "HARM_CATEGORY_HATE_SPEECH",
-                        "threshold": "BLOCK_ONLY_HIGH",
-                    },
-                    {
-                        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                        "threshold": "BLOCK_ONLY_HIGH",
-                    },
-                    {
-                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                        "threshold": "BLOCK_ONLY_HIGH",
-                    },
-                ]
-
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    generation_config=generation_config,
-                    safety_settings=safety_settings,
+            if not model_name:
+                raise ValueError(
+                    f"{llm_provider}: model_name is not set, please set it in the config.toml file."
                 )
 
-                try:
-                    response = model.generate_content(prompt)
-                    candidates = response.candidates
-                    generated_text = candidates[0].content.parts[0].text
-                except (AttributeError, IndexError) as e:
-                    print("Gemini Error:", e)
+            response = litellm.completion(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                drop_params=True,
+            )
 
-                return generated_text
+            if not response:
+                raise ValueError(f"[{llm_provider}] returned empty response")
+            if not getattr(response, "choices", None):
+                raise ValueError(f"[{llm_provider}] returned empty response")
 
-            if llm_provider == "cloudflare":
-                response = requests.post(
-                    f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model_name}",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json={
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": "You are a friendly assistant",
-                            },
-                            {"role": "user", "content": prompt},
-                        ]
-                    },
-                )
-                result = response.json()
-                logger.info(result)
-                return result["result"]["response"]
+            return _extract_chat_completion_text(response, llm_provider)
 
-            if llm_provider == "ernie":
-                response = requests.post(
-                    "https://aip.baidubce.com/oauth/2.0/token", 
-                    params={
-                        "grant_type": "client_credentials",
-                        "client_id": api_key,
-                        "client_secret": secret_key,
-                    }
-                )
-                access_token = response.json().get("access_token")
-                url = f"{base_url}?access_token={access_token}"
-
-                payload = json.dumps(
-                    {
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.5,
-                        "top_p": 0.8,
-                        "penalty_score": 1,
-                        "disable_search": False,
-                        "enable_citation": False,
-                        "response_format": "text",
-                    }
-                )
-                headers = {"Content-Type": "application/json"}
-
-                response = requests.request(
-                    "POST", url, headers=headers, data=payload
-                ).json()
-                return response.get("result")
-
-            if llm_provider == "azure":
-                client = AzureOpenAI(
-                    api_key=api_key,
-                    api_version=api_version,
-                    azure_endpoint=base_url,
-                )
-
-            if llm_provider == "modelscope":
-                content = ''
-                client = OpenAI(
-                    api_key=api_key,
-                    base_url=base_url,
-                )
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    extra_body={"enable_thinking": False},
-                    stream=True
-                )
-                if response:
-                    for chunk in response:
-                        if not chunk.choices:
-                            continue
-                        delta = chunk.choices[0].delta
-                        if delta and delta.content:
-                            content += delta.content
-                    
-                    if not content.strip():
-                        raise ValueError("Empty content in stream response")
-                    
-                    return content.replace("\n", "")
-                else:
-                    raise Exception(f"[{llm_provider}] returned an empty response")
-
-            else:
-                client = OpenAI(
-                    api_key=api_key,
-                    base_url=base_url,
-                    timeout=60.0,
-                )
-
+        if adapter == "azure":
+            # Azure OpenAI SDK 使用 `azure_endpoint` 和 `api_version` 生成专用请求地址，
+            # 不能继续复用下面普通 OpenAI-compatible 的 `base_url` 初始化逻辑。
+            # 这里在 Azure 分支内完成请求并立即返回，避免客户端被后续 fallback
+            # 覆盖，导致用户配置的 Azure 凭证通过校验但实际请求没有被使用。
+            logger.info(f"requesting azure chat completion, model: {model_name}")
+            client = AzureOpenAI(
+                api_key=api_key,
+                api_version=api_version,
+                azure_endpoint=base_url,
+            )
             response = client.chat.completions.create(
                 model=model_name, messages=[{"role": "user", "content": prompt}]
             )
             if response:
                 if isinstance(response, ChatCompletion):
-                    content = response.choices[0].message.content
+                    return _extract_chat_completion_text(response, llm_provider)
                 else:
                     raise Exception(
                         f'[{llm_provider}] returned an invalid response: "{response}", please check your network '
@@ -333,107 +347,179 @@ def _generate_response(prompt: str) -> str:
                     f"[{llm_provider}] returned an empty response, please check your network connection and try again."
                 )
 
-        return content.replace("\n", "")
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-
-def generate_viral_topic(category: str = "") -> str:
-    """Generate a viral video topic using the LLM."""
-    prompt = f"""
-# Role: Viral Content Strategist
-
-## Goal:
-Generate ONE single specific, viral-worthy short video topic.
-
-## Constraints:
-1. Return ONLY the topic text. No quotes, no explanations, no "Here is a topic:".
-2. The topic must be catchy, intriguing, and suitable for a short video (Shorts/Reels/TikTok).
-3. If a category is provided, the topic must belong to that category.
-4. If no category is provided, choose a random popular niche (Mystery, Facts, History, Science, Psychology, Finance, etc.).
-5. The topic should be in English.
-6. Make it sound like a hook or a title.
-
-## Input:
-Category: {category if category else "Random Mixed"}
-
-## Example Outputs:
-- The Dark Secret Behind the Mona Lisa's Smile
-- Why You Should Never Sleep with Your Phone
-- The Man Who Survived Two Nuclear Bombs
-- 3 Money Hacks Banks Don't Want You to Know
-""".strip()
-
-    for i in range(_max_retries):
-        try:
-            response = _generate_response(prompt=prompt)
+        if adapter == "modelscope":
+            content = ""
+            client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+            )
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                extra_body={"enable_thinking": False},
+                stream=True,
+            )
             if response:
-                # Clean up response
-                topic = response.strip().strip('"').strip("'")
-                # Remove prefixes like "Topic: " or "1. "
-                topic = re.sub(r"^(Topic:|Here is a topic:|1\.|-)\s*", "", topic, flags=re.IGNORECASE)
-                return topic
-        except Exception as e:
-            logger.error(f"failed to generate viral topic: {e}")
-        
-        if i < _max_retries:
-            time.sleep(1)
-            
-    return "The Mystery of Why This Topic Failed to Load"
+                for chunk in response:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+                    if delta and delta.content:
+                        content += delta.content
+
+                if not content.strip():
+                    raise ValueError("Empty content in stream response")
+
+                return _normalize_text_response(content, llm_provider)
+            else:
+                raise Exception(f"[{llm_provider}] returned an empty response")
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+        )
+
+        response = client.chat.completions.create(
+            model=model_name, messages=[{"role": "user", "content": prompt}]
+        )
+        if response:
+            if isinstance(response, ChatCompletion):
+                return _extract_chat_completion_text(response, llm_provider)
+            else:
+                raise Exception(
+                    f'[{llm_provider}] returned an invalid response: "{response}", please check your network '
+                    f"connection and try again."
+                )
+        else:
+            raise Exception(
+                f"[{llm_provider}] returned an empty response, please check your network connection and try again."
+            )
+
+    except Exception as e:
+        return f"Error: {_sanitize_error_message(e)}"
+
+
+def test_connection() -> tuple[bool, str, float]:
+    """
+    使用当前 Provider 配置发起一次最小请求，验证实际生成链路是否可用。
+
+    连接测试直接复用 `_generate_response()`，因此会覆盖 API Key、Base URL、
+    模型名称和 Provider 专用字段，但不会进入脚本生成的重试逻辑，也不会发送
+    用户的视频主题或文案。返回值依次为成功状态、错误信息和请求耗时。
+    """
+    started_at = perf_counter()
+    response = _generate_response(prompt="Reply with exactly: OK")
+    elapsed = perf_counter() - started_at
+
+    if not response:
+        error_message = "LLM returned an empty response"
+        logger.warning(f"llm connection test failed: {error_message}")
+        return False, error_message, elapsed
+
+    if response.startswith("Error:"):
+        error_message = response.removeprefix("Error:").strip()
+        logger.warning(f"llm connection test failed: {error_message}")
+        return False, error_message, elapsed
+
+    logger.info(f"llm connection test succeeded, elapsed: {elapsed:.2f}s")
+    return True, "", elapsed
+
+
+def _limit_script_text(text: str | None, max_length: int, field_name: str) -> str:
+    value = (text or "").strip()
+    if len(value) <= max_length:
+        return value
+
+    # API 层已经用 Pydantic 做长度校验；这里继续兜底，是为了保护
+    # WebUI 或内部服务直接调用 generate_script 时不会把超长提示词发送给模型，
+    # 避免 token 成本异常和请求失败。
+    logger.warning(
+        f"{field_name} is too long and will be truncated to {max_length} characters."
+    )
+    return value[:max_length]
+
+
+def _normalize_script_paragraph_number(paragraph_number: int | None) -> int:
+    try:
+        value = int(paragraph_number or MIN_SCRIPT_PARAGRAPH_NUMBER)
+    except (TypeError, ValueError):
+        value = MIN_SCRIPT_PARAGRAPH_NUMBER
+
+    if value < MIN_SCRIPT_PARAGRAPH_NUMBER or value > MAX_SCRIPT_PARAGRAPH_NUMBER:
+        # WebUI 和 API 都会限制范围；这里兜底处理内部调用，避免异常参数直接扩大
+        # LLM 生成成本或生成空结果。
+        logger.warning(
+            f"script paragraph_number is out of range and will be clamped: {value}"
+        )
+        return max(MIN_SCRIPT_PARAGRAPH_NUMBER, min(value, MAX_SCRIPT_PARAGRAPH_NUMBER))
+
+    return value
+
+
+def build_script_prompt(
+    video_subject: str,
+    language: str = "",
+    paragraph_number: int = 1,
+    video_script_prompt: str = "",
+    custom_system_prompt: str = "",
+) -> str:
+    paragraph_number = _normalize_script_paragraph_number(paragraph_number)
+    video_script_prompt = _limit_script_text(
+        video_script_prompt, MAX_SCRIPT_PROMPT_LENGTH, "video_script_prompt"
+    )
+    custom_system_prompt = _limit_script_text(
+        custom_system_prompt, MAX_SCRIPT_SYSTEM_PROMPT_LENGTH, "custom_system_prompt"
+    )
+
+    # 将“脚本生成规则”和“运行时上下文”分开拼接。这样高级用户即使覆盖默认
+    # system prompt，也不会漏掉视频主题、语言、段落数这些每次生成都必须带上的参数。
+    prompt = custom_system_prompt or DEFAULT_SCRIPT_SYSTEM_PROMPT
+    prompt += f"""
+
+# Initialization:
+- video subject: {video_subject}
+- number of paragraphs: {paragraph_number}
+""".rstrip()
+    if language:
+        prompt += f"\n- language: {language}"
+    if video_script_prompt:
+        prompt += f"""
+
+# Additional User Requirements:
+{video_script_prompt}
+""".rstrip()
+
+    return prompt
 
 
 def generate_script(
-    video_subject: str, language: str = "", paragraph_number: int = 1
+    video_subject: str,
+    language: str = "",
+    paragraph_number: int = 1,
+    video_script_prompt: str = "",
+    custom_system_prompt: str = "",
 ) -> str:
-    # T0-6: Enhanced prompt for high-retention short video scripts
-    prompt = f"""
-# Role: Viral Short Video Script Generator
-
-## Goals:
-Generate an engaging, high-retention script for a short video (30-90 seconds) on the given subject.
-
-## Script Structure:
-1. HOOK (first sentence): Start with a bold claim, surprising fact, or provocative question. This must grab attention in under 2 seconds.
-2. SETUP (next 2-3 sentences): Build context quickly with short, punchy sentences.
-3. ESCALATION (body): Present the main content with increasing intensity. Use rhetorical questions and micro-cliffhangers between paragraphs.
-4. PAYOFF (ending): Deliver a satisfying conclusion or surprising twist. End with a thought-provoking statement.
-
-## Pacing & Visual Rules:
-1. Keep sentences SHORT — maximum 12 words per sentence. 
-2. Include at least ONE rhetorical question per paragraph.
-3. Use micro-cliffhangers: "But here's what most people don't know..." / "And that's when things got interesting..."
-4. Vary sentence length: alternate between very short (3-5 words) and medium (8-12 words) for rhythm.
-5. Use power words: "secret", "shocking", "incredible", "unbelievable", "impossible" where natural.
-6. **VISUAL CONTEXT INJECTION**: Strongly imply the setting/era in the text (e.g., mention "ancient stone walls", "golden desert sands", "neon city lights"). This helps our AI later match rich, contextual stock footage to your sentences.
-
-## Constrains:
-1. Return the script as a string with the specified number of paragraphs.
-2. Do NOT reference this prompt in your response.
-3. Get straight to the point — no "welcome to this video" or similar introductions.
-4. No markdown formatting, no titles, no headers.
-5. Only return raw script content.
-6. Do NOT include "voiceover", "narrator" or similar indicators.
-7. Never mention the prompt, script structure, or paragraph count.
-8. Respond in the same language as the video subject.
-9. Use a conversational, energetic tone — as if talking to a friend.
-10. IMPORTANT: All content must be safe and appropriate for ALL audiences. No violence, horror, sexual content, drugs, alcohol, profanity, gambling, weapons, or disturbing themes.
-
-# Input:
-- video subject: {video_subject}
-- number of paragraphs: {paragraph_number}
-""".strip()
-    if language:
-        prompt += f"\n- language: {language}"
-
+    paragraph_number = _normalize_script_paragraph_number(paragraph_number)
+    video_script_prompt = _limit_script_text(
+        video_script_prompt, MAX_SCRIPT_PROMPT_LENGTH, "video_script_prompt"
+    )
+    custom_system_prompt = _limit_script_text(
+        custom_system_prompt, MAX_SCRIPT_SYSTEM_PROMPT_LENGTH, "custom_system_prompt"
+    )
+    prompt = build_script_prompt(
+        video_subject=video_subject,
+        language=language,
+        paragraph_number=paragraph_number,
+        video_script_prompt=video_script_prompt,
+        custom_system_prompt=custom_system_prompt,
+    )
     final_script = ""
-    logger.info(f"subject: {video_subject}")
-
-    # [I2] Check cache first
-    cached = llm_cache.get("script", subject=video_subject, language=language, paragraphs=paragraph_number)
-    if cached:
-        logger.success(f"[LLM Cache] Returning cached script for '{video_subject}'")
-        return cached
-
+    logger.info(
+        "generating video script: "
+        f"subject={video_subject}, paragraph_number={paragraph_number}, "
+        f"has_custom_prompt={bool(video_script_prompt.strip())}, "
+        f"has_custom_system_prompt={bool(custom_system_prompt.strip())}"
+    )
 
     def format_response(response):
         # Clean the script
@@ -462,7 +548,7 @@ Generate an engaging, high-retention script for a short video (30-90 seconds) on
             else:
                 logging.error("gpt returned an empty response")
 
-            # g4f may return an error message
+            # Some upstream providers may return quota errors as plain text.
             if final_script and "当日额度已消耗完" in final_script:
                 raise ValueError(final_script)
 
@@ -473,60 +559,83 @@ Generate an engaging, high-retention script for a short video (30-90 seconds) on
 
         if i < _max_retries:
             logger.warning(f"failed to generate video script, trying again... {i + 1}")
-            time.sleep(2 * (i + 1))  # exponential backoff
     if "Error: " in final_script:
         logger.error(f"failed to generate video script: {final_script}")
-        return None
     else:
         logger.success(f"completed: \n{final_script}")
-        # [I2] Store in cache
-        llm_cache.set("script", final_script, subject=video_subject, language=language, paragraphs=paragraph_number)
     return final_script.strip()
 
 
-def generate_terms(video_subject: str, video_script: str, amount: int = 5, use_faceless: bool = False) -> List[str]:
-    faceless_instruction = ""
-    if use_faceless:
-        faceless_instruction = """
-7. **FACELESS MODE ACTIVE**: 
-   - STRICTLY AVOID terms that imply a person's face (e.g., "portrait", "face", "looking at camera", "talking head").
-   - Focus on: "hands doing x", "back view of person", "over the shoulder shot", "close up of objects", "scenery", "environment".
-   - If the subject requires a person, use "silhouette", "shadow", "body part only".
-"""
+def _strip_code_fence(text: str) -> str:
+    """Strip a surrounding markdown code fence from an LLM response.
+
+    Non-OpenAI providers (Claude, Gemini, …) frequently wrap JSON output in a
+    ```json … ``` fence even when asked to return raw JSON. Removing it lets the
+    first json.loads() succeed instead of falling through to the regex recovery
+    path (and spuriously logging a warning). Mirrors the DOTALL handling already
+    used in _parse_social_metadata().
+    """
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z0-9]*\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+    return t.strip()
+
+
+def generate_terms(
+    video_subject: str,
+    video_script: str,
+    amount: int = 5,
+    match_script_order: bool = False,
+) -> List[str]:
+    if match_script_order:
+        goal = (
+            f"Generate {amount} chronological stock-video search terms that follow "
+            "the order of topics in the video script."
+        )
+        ordering_rule = (
+            "6. keep the terms in the same order as the script narration; "
+            "earlier terms must describe earlier visual moments."
+        )
+        # 有序关键词模式下，示例数量要和 amount 保持一致，避免模型被固定
+        # 的 4 个示例误导，导致长文案只返回少量关键词，影响素材覆盖度。
+        example_terms = [
+            "opening visual topic",
+            *[f"script visual topic {index}" for index in range(2, max(amount, 1))],
+            "final visual topic",
+        ]
+        output_example = json.dumps(example_terms[:amount], ensure_ascii=False)
+    else:
+        goal = (
+            f"Generate {amount} search terms for stock videos, depending on the "
+            "subject of a video."
+        )
+        ordering_rule = ""
+        output_example = (
+            '["search term 1", "search term 2", "search term 3",'
+            '"search term 4", "search term 5"]'
+        )
 
     prompt = f"""
 # Role: Video Search Terms Generator
 
 ## Goals:
-Analyze the video subject and script for historical, geographical, and emotional context. Then, generate {amount} highly specific search terms for background stock videos that match this deep context.
+{goal}
 
-## Constraints:
-1. The search terms must be returned as a JSON-array of strings.
-2. **HOOK PRIORITY**: The VERY FIRST term in your array (Index 0) MUST be the "Hook Term". This term must represent the most powerful, highly contextual visual for the opening 5 seconds (e.g., "Ancient Mecca Pilgrims", "Golden Desert Sunset").
-3. **CONTEXT AWARENESS**: Before generating the rest of the terms, analyze the script to understand:
-   - **Time Period**: Is it ancient, modern, futuristic? (e.g., Use "ancient", "historical", "vintage" if applicable).
-   - **Geography/Location**: Where does this take place? (e.g., "desert", "middle east", "jungle", "ocean").
-   - **Mood/Action**: What is the core vibe? (e.g., "peaceful", "crowd", "praying", "chaotic").
-   - Integrate these contextual adjectives with the core nouns.
-4. **CRITICAL: STOCK SEARCH ALGORITHM**: Stock video search engines (like Pexels/Pixabay) DO NOT understand complex sentences.
-   - You MUST extract only the **core 1-3 noun keywords** from the subject.
-   - DROP all conversational/filler words (e.g., drop "History of", "How to", "Why did", "Story of").
-   - If the subject has comma/punctuation like "Kabah, Makah", simplify it to "Kabah Makah" or even just "Kaaba Mecca" (use the most common English spelling for better stock results).
-3. **VISUAL FOCUS**: Generate terms that represent **tangible objects** or **visual scenes** related to the script.
-   - BAD (Too long/abstract): "History of Kabah ancient walls", "Makah religious emotion"
-   - GOOD (Punchy Contextual Nouns): "Kaaba Mecca", "Ancient desert pilgrims", "Islamic Architecture", "Middle east desert"
-5. Avoid generic words like "video", "footage", "4k", "hd", "scene".
-6. Reply with English search terms only.
-7. All search terms must be safe and appropriate for children.
-{faceless_instruction}
+## Constrains:
+1. the search terms are to be returned as a json-array of strings.
+2. each search term should consist of 1-3 words, always add the main subject of the video.
+3. you must only return the json-array of strings. you must not return anything else. you must not return the script.
+4. the search terms must be related to the subject of the video.
+5. reply with english search terms only.
+{ordering_rule}
 
 ## Output Example:
-["Kaaba Mecca", "Ancient desert pilgrims", "Islamic architecture", "Middle east desert"]
+{output_example}
 
 ## Context:
 ### Video Subject
 {video_subject}
-
 
 ### Video Script
 {video_script}
@@ -534,26 +643,21 @@ Analyze the video subject and script for historical, geographical, and emotional
 Please note that you must use English for generating video search terms; Chinese is not accepted.
 """.strip()
 
-    logger.info(f"subject: {video_subject}")
-
-    # [I2] Check cache first
-    _script_hash = hashlib.md5(video_script.encode()).hexdigest()[:8] if video_script else "none"
-    cached = llm_cache.get("terms", subject=video_subject, script_hash=_script_hash, faceless=use_faceless)
-    if cached:
-        try:
-            return json.loads(cached)
-        except Exception:
-            pass  # fall through to LLM call
+    logger.info(f"subject: {video_subject}, match_script_order: {match_script_order}")
 
     search_terms = []
     response = ""
     for i in range(_max_retries):
         try:
             response = _generate_response(prompt)
-            if "Error: " in response:
+            if response.startswith("Error: "):
+                # generate_terms 的公开返回类型是 List[str]。如果把 Provider 的
+                # 错误文案原样返回，下游只做空值判断时会把非空字符串误认为成功，
+                # 素材下载循环还会按字符遍历错误文案，产生无意义的外部请求。
+                # 这里统一返回空列表，让任务编排层在真实故障位置立即结束任务。
                 logger.error(f"failed to generate video terms: {response}")
-                return None
-            search_terms = json.loads(response)
+                return []
+            search_terms = json.loads(_strip_code_fence(response))
             if not isinstance(search_terms, list) or not all(
                 isinstance(term, str) for term in search_terms
             ):
@@ -563,106 +667,285 @@ Please note that you must use English for generating video search terms; Chinese
         except Exception as e:
             logger.warning(f"failed to generate video terms: {str(e)}")
             if response:
-                match = re.search(r"\[.*]", response)
+                match = re.search(r"\[.*]", response, re.DOTALL)
                 if match:
                     try:
                         search_terms = json.loads(match.group())
                     except Exception as e:
+                        # 这里保留重试流程，但必须记录 LLM 返回的非标准 JSON，
+                        # 否则后续排查搜索词为空时无法定位
+                        # 是模型格式问题还是解析逻辑问题。
                         logger.warning(f"failed to generate video terms: {str(e)}")
-                        pass
 
         if search_terms and len(search_terms) > 0:
             break
         if i < _max_retries:
             logger.warning(f"failed to generate video terms, trying again... {i + 1}")
-            time.sleep(2 * (i + 1))  # exponential backoff
 
     logger.success(f"completed: \n{search_terms}")
-    # [I2] Store in cache
-    if search_terms:
-        _script_hash = hashlib.md5(video_script.encode()).hexdigest()[:8] if video_script else "none"
-        llm_cache.set("terms", json.dumps(search_terms), subject=video_subject, script_hash=_script_hash, faceless=use_faceless)
     return search_terms
 
 
-def generate_scene_terms(video_subject: str, video_script: str, use_faceless: bool = False) -> list[dict]:
+# =============================================================================
+# Social publishing metadata
+#
+# 根据视频主题和脚本生成发布到短视频平台时常用的 title、caption 和 hashtags。
+# 这块能力只复用现有 LLM provider，不接入任何外部发布服务，也不影响视频生成主链路。
+# =============================================================================
+
+# 不同平台的文案长度和 hashtag 数量偏好不同。这里使用保守上限，避免模型返回
+# 过长内容后调用方还需要二次裁剪。
+SOCIAL_PLATFORMS = {
+    "tiktok": {"title_max": 100, "caption_max": 2200, "hashtag_count": 5},
+    "youtube_shorts": {"title_max": 100, "caption_max": 5000, "hashtag_count": 3},
+    "instagram_reels": {"title_max": 125, "caption_max": 2200, "hashtag_count": 8},
+    "facebook_reels": {"title_max": 125, "caption_max": 2200, "hashtag_count": 5},
+}
+DEFAULT_SOCIAL_PLATFORM = "tiktok"
+DEFAULT_SOCIAL_LANGUAGE = "auto"
+MAX_SOCIAL_SUBJECT_LENGTH = 500
+MAX_SOCIAL_SCRIPT_LENGTH = 8000
+MAX_SOCIAL_LANGUAGE_LENGTH = 64
+
+SOCIAL_PLATFORM_LABELS = {
+    "tiktok": "TikTok",
+    "youtube_shorts": "YouTube Shorts",
+    "instagram_reels": "Instagram Reels",
+    "facebook_reels": "Facebook Reels",
+}
+
+# LLM 不可用时的通用兜底标签。这里故意不绑定某个国家或语种，保证 API
+# 对中文、英文、越南语等不同场景都能返回可用结构。
+DEFAULT_SOCIAL_HASHTAGS = [
+    "#shorts",
+    "#viral",
+    "#trending",
+    "#fyp",
+    "#video",
+    "#reels",
+    "#creator",
+    "#content",
+]
+
+
+def _resolve_social_platform(platform: str | None) -> str:
+    value = (platform or "").strip().lower()
+    return value if value in SOCIAL_PLATFORMS else DEFAULT_SOCIAL_PLATFORM
+
+
+def _normalize_social_language(language: str | None) -> str:
+    value = (language or DEFAULT_SOCIAL_LANGUAGE).strip()
+    if len(value) > MAX_SOCIAL_LANGUAGE_LENGTH:
+        logger.warning(
+            "social metadata language is too long and will be truncated to "
+            f"{MAX_SOCIAL_LANGUAGE_LENGTH} characters."
+        )
+        value = value[:MAX_SOCIAL_LANGUAGE_LENGTH]
+    return value or DEFAULT_SOCIAL_LANGUAGE
+
+
+def _limit_social_text(text: str | None, max_length: int, field_name: str) -> str:
+    value = (text or "").strip()
+    if len(value) <= max_length:
+        return value
+
+    # API 层会限制长度；这里继续兜底，是为了保护内部调用或未来 WebUI
+    # 直接调用时不会把超长内容发送给模型，避免 token 成本异常。
+    logger.warning(
+        f"{field_name} is too long and will be truncated to {max_length} characters."
+    )
+    return value[:max_length]
+
+
+def _social_language_instruction(language: str | None) -> str:
+    language = _normalize_social_language(language)
+    if language.lower() == DEFAULT_SOCIAL_LANGUAGE:
+        return (
+            "Use the same language as the video subject and script. If the subject "
+            "and script use different languages, prefer the script language."
+        )
+
+    return f'Write "title" and "caption" in this language: {language}.'
+
+
+def _clamp_text(text, max_length: int) -> str:
+    value = ("" if text is None else str(text)).strip()
+    if max_length and len(value) > max_length:
+        return value[:max_length].rstrip()
+    return value
+
+
+def _normalize_hashtags(raw, count: int) -> List[str]:
     """
-    [C3] Scene-Aware Video Matching: generate one search term per script sentence.
-    Returns a list of dicts: [{"sentence": "...", "term": "..."}, ...]
-    Falls back to regular generate_terms if LLM fails.
+    将 LLM 返回的 hashtag 统一整理成 `#tag` 格式。
+
+    LLM 可能返回字符串、数组、带空格的词组、重复标签或包含标点的内容。
+    这里集中清洗，可以让接口响应结构稳定，也避免平台发布时出现空标签、
+    重复标签或不符合常见格式的 hashtag。
     """
-    faceless_note = ""
-    if use_faceless:
-        faceless_note = "\n- AVOID terms with faces, portraits, or people looking at camera."
+    if isinstance(raw, str):
+        candidates = re.split(r"[\s,]+", raw)
+    elif isinstance(raw, (list, tuple)):
+        # 数组里的每一项视为一个完整标签，因此 "du lich" 会变成
+        # "#dulich"，而不是拆成两个标签。
+        candidates = [str(entry) for entry in raw]
+    else:
+        candidates = []
+
+    seen = set()
+    result: List[str] = []
+    for item in candidates:
+        tag = re.sub(r"[^\w]", "", item, flags=re.UNICODE)
+        if not tag:
+            continue
+        key = tag.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(f"#{tag}")
+        if count and len(result) >= count:
+            break
+    return result
+
+
+def build_social_metadata_prompt(
+    video_subject: str,
+    video_script: str = "",
+    language: str = DEFAULT_SOCIAL_LANGUAGE,
+    platform: str = DEFAULT_SOCIAL_PLATFORM,
+) -> str:
+    video_subject = _limit_social_text(
+        video_subject, MAX_SOCIAL_SUBJECT_LENGTH, "video_subject"
+    )
+    video_script = _limit_social_text(
+        video_script, MAX_SOCIAL_SCRIPT_LENGTH, "video_script"
+    )
+    platform = _resolve_social_platform(platform)
+    spec = SOCIAL_PLATFORMS[platform]
+    label = SOCIAL_PLATFORM_LABELS.get(platform, platform)
+    language_instruction = _social_language_instruction(language)
 
     prompt = f"""
-# Role: Scene-Aware Video Director
+# Role: Short-Video Social Media Copywriter
 
-## Task
-You are given a video script. For EACH sentence, generate ONE highly specific stock video search term
-that visually represents what is being narrated at that moment.
+## Goal
+Write engaging publishing metadata for a short video that will be posted on {label}.
 
-## Rules
-1. Return ONLY a JSON array of objects with "sentence" and "term" keys.
-2. **CONTEXT AWARENESS**: Before extracting terms, deeply analyze the `video_subject` and surrounding script for context.
-   - If the subject is historical/ancient, your term must reflect that (e.g., "ancient", "historical", "vintage").
-   - If it's geographically specific (e.g., Mecca, Desert), ensure terms don't pull modern city stock.
-   - For example: if the script says "People walked towards the building" in a historical piece about Kaaba, the term should be "Ancient pilgrims walking" NOT just "people walking".
-3. **CRITICAL: STOCK SEARCH ALGORITHM**: Each "term" MUST be only 1-3 simple noun keywords (e.g., "desert sunset", "arabic coffee", "crowd walking"). 
-   - Stock video search engines (Pexels/Pixabay) DO NOT understand verbs, full sentences, or abstract concepts. 
-   - Extract only the core visual objects from the sentence, merged with the historical/geographical context.
-3. Terms must be in English.
-4. Match the visual mood and content of each sentence.
-6. Avoid generic terms like "video", "footage", "clip".{faceless_note}
+## Constraints
+1. Respond ONLY with a single valid minified JSON object. No markdown, no code fences, no commentary.
+2. The JSON must contain exactly these keys: "title", "caption", "hashtags".
+3. "title": a catchy hook, at most {spec["title_max"]} characters.
+4. "caption": an engaging description that ends with a call to action, at most {spec["caption_max"]} characters. Do not put hashtags inside the caption.
+5. "hashtags": a JSON array of exactly {spec["hashtag_count"]} strings. Each must start with "#", contain no spaces, and be relevant to the topic and to {label}.
+6. {language_instruction}
 
-## Context Data
-- **Overall Subject:** {video_subject}
+## Output Example
+{{"title":"...","caption":"...","hashtags":["#example","#video"]}}
 
-## Script to Break Down
+## Context
+### Video Subject
+{video_subject}
+
+### Video Script
 {video_script}
-
-## Output Format (JSON only, no markdown):
-[
-  {{"sentence": "First sentence of script.", "term": "specific visual search term"}},
-  {{"sentence": "Second sentence.", "term": "another specific term"}}
-]
 """.strip()
+    return prompt
 
-    logger.info(f"[C3] Generating scene-aware terms for {len(video_script.split('.'))} sentences...")
 
-    # Check cache
-    _hash = hashlib.md5(video_script.encode()).hexdigest()[:8]
-    cached = llm_cache.get("scene_terms", subject=video_subject, script_hash=_hash, faceless=use_faceless)
-    if cached:
-        try:
-            return json.loads(cached)
-        except Exception:
-            pass
+def _parse_social_metadata(response: str, platform: str) -> dict:
+    spec = SOCIAL_PLATFORMS[_resolve_social_platform(platform)]
 
-    scene_terms = []
+    data = None
+    try:
+        data = json.loads(_strip_code_fence(response))
+    except Exception:
+        # 部分模型会在 JSON 外层包一段说明文字或 markdown fence。
+        # API 调用方只需要稳定结构，所以这里尝试提取第一个 JSON object。
+        match = re.search(r"\{.*\}", response or "", re.DOTALL)
+        if match:
+            data = json.loads(match.group())
+
+    if not isinstance(data, dict):
+        raise ValueError("social metadata response is not a JSON object")
+
+    title = _clamp_text(data.get("title", ""), spec["title_max"])
+    caption = _clamp_text(data.get("caption", ""), spec["caption_max"])
+    hashtags = _normalize_hashtags(data.get("hashtags", []), spec["hashtag_count"])
+
+    if not title and not caption:
+        raise ValueError("social metadata response is missing both title and caption")
+
+    return {"title": title, "caption": caption, "hashtags": hashtags}
+
+
+def _fallback_social_metadata(
+    video_subject: str, video_script: str, platform: str
+) -> dict:
+    spec = SOCIAL_PLATFORMS[_resolve_social_platform(platform)]
+    subject = (video_subject or "").strip()
+    script = (video_script or "").strip()
+
+    title = subject
+    if not title and script:
+        # 没有主题时，用脚本第一句兜底生成 title，避免接口返回空标题。
+        title = re.split(r"(?<=[.!?。！？])\s+", script)[0]
+
+    return {
+        "title": _clamp_text(title, spec["title_max"]),
+        "caption": _clamp_text(script or subject, spec["caption_max"]),
+        "hashtags": _normalize_hashtags(DEFAULT_SOCIAL_HASHTAGS, spec["hashtag_count"]),
+    }
+
+
+def generate_social_metadata(
+    video_subject: str,
+    video_script: str = "",
+    language: str = DEFAULT_SOCIAL_LANGUAGE,
+    platform: str = DEFAULT_SOCIAL_PLATFORM,
+) -> dict:
+    """
+    生成短视频发布文案元数据。
+
+    返回结构固定为 `{"title": str, "caption": str, "hashtags": List[str]}`。
+    如果 LLM 不可用或返回格式异常，会降级为通用启发式结果，保证 API
+    调用方始终拿到可展示、可发布前编辑的数据结构。
+    """
+    platform = _resolve_social_platform(platform)
+    language = _normalize_social_language(language)
+    video_subject = _limit_social_text(
+        video_subject, MAX_SOCIAL_SUBJECT_LENGTH, "video_subject"
+    )
+    video_script = _limit_social_text(
+        video_script, MAX_SOCIAL_SCRIPT_LENGTH, "video_script"
+    )
+    prompt = build_social_metadata_prompt(
+        video_subject=video_subject,
+        video_script=video_script,
+        language=language,
+        platform=platform,
+    )
+    logger.info(f"generating social metadata: platform={platform}, language={language}")
+
+    response = ""
     for i in range(_max_retries):
         try:
             response = _generate_response(prompt)
-            if not response:
-                continue
-            # Extract JSON array
-            match = re.search(r"\[.*\]", response, re.DOTALL)
-            if match:
-                parsed = json.loads(match.group())
-                if isinstance(parsed, list) and all("term" in item for item in parsed):
-                    scene_terms = parsed
-                    break
+            if isinstance(response, str) and "Error: " in response:
+                logger.error(f"failed to generate social metadata: {response}")
+                break
+            metadata = _parse_social_metadata(response, platform)
+            logger.success(f"completed: \n{metadata}")
+            return metadata
         except Exception as e:
-            logger.warning(f"[C3] Scene terms attempt {i+1} failed: {e}")
-            time.sleep(2 * (i + 1))
+            logger.warning(f"failed to parse social metadata: {str(e)}")
 
-    if scene_terms:
-        llm_cache.set("scene_terms", json.dumps(scene_terms), subject=video_subject, script_hash=_hash, faceless=use_faceless)
-        logger.success(f"[C3] Generated {len(scene_terms)} scene-aware terms")
-    else:
-        logger.warning("[C3] Scene terms generation failed, falling back to regular terms")
+        if i < _max_retries - 1:
+            logger.warning(
+                f"failed to generate social metadata, trying again... {i + 1}"
+            )
 
-    return scene_terms
+    logger.warning("falling back to heuristic social metadata")
+    return _fallback_social_metadata(video_subject, video_script, platform)
 
 
 if __name__ == "__main__":
@@ -677,50 +960,3 @@ if __name__ == "__main__":
     )
     print("######################")
     print(search_terms)
-    
-def generate_veo_prompts(video_subject: str, video_script: str) -> dict:
-    """
-    Generate Veo prompts (positive and negative) based on the video subject and script.
-    """
-    prompt = f"""
-# Role: Video Director & Cinematographer
-
-# Task
-Generate a highly detailed, cinematic prompt for a video generation AI (like Google Veo) and a negative prompt to avoid unwanted elements.
-The video will be used as the **initial hook** (first 5-8 seconds) of a video about: "{video_subject}".
-
-# Video Script Context:
-{video_script[:500]}...
-
-# Instructions
-1. **Positive Prompt**: Describe the visual scene in detail.
-   - Style: **Photorealistic, Cinematic, 4k, High Detail**.
-   - Lighting: Cinematic lighting, golden hour, or dramatic lighting.
-   - Camera: Drone shot, close up, or tracking shot.
-   - Content: Make it catchy and relevant to the hook. Focus on the main subject.
-2. **Negative Prompt**: STRICTLY avoid these elements:
-   - text, watermark, logo, copyright, blurry, distorted, bad anatomy, deformed, cartoon, illustration, painting, low quality, pixelated.
-
-# Output Format
-Return ONLY a JSON object:
-{{
-  "prompt": "your detailed positive prompt here",
-  "negative_prompt": "your negative prompt here"
-}}
-"""
-    response = _generate_response(prompt)
-    try:
-        # Extract JSON from potential markdown code blocks
-        match = re.search(r"\{.*\}", response, re.DOTALL)
-        if match:
-            json_str = match.group()
-            return json.loads(json_str)
-        else:
-            return json.loads(response)
-    except Exception as e:
-        logger.error(f"Failed to parse Veo prompts from LLM response: {e}. Response: {response}")
-        # Fallback
-        return {
-            "prompt": f"Cinematic shot of {video_subject}, 8k resolution, highly detailed, professional lighting.",
-            "negative_prompt": "text, watermark, blurry, distorted, cartoon, low quality"
-        }
