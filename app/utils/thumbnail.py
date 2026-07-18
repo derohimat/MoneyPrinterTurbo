@@ -110,7 +110,6 @@ def generate_thumbnails(video_path: str, output_dir: str, count: int = 3, text_o
                     font_size = int(img.height * 0.08) # 8% of height for bold title
                     # Try to use STHeitiMedium or fallback
                     from app.utils.utils import font_dir
-                    import os
                     font_path = os.path.join(font_dir(), "STHeitiMedium.ttc")
                     if not os.path.exists(font_path):
                         font_path = "arial.ttf"

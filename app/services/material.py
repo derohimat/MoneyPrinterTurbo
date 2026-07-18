@@ -1,6 +1,8 @@
 import os
 import random
 import threading
+import json
+import time
 from typing import List
 from urllib.parse import urlencode
 
@@ -11,6 +13,83 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
 from app.utils import utils
+
+_cache_lock = threading.Lock()
+
+def _get_cached_search(search_term: str, provider: str, video_aspect: VideoAspect) -> List[MaterialInfo] | None:
+    cache_file = os.path.join(utils.storage_dir(""), "pexels_search_cache.json")
+    if not os.path.exists(cache_file):
+        return None
+    try:
+        with _cache_lock:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                cache_data = json.load(f)
+        key = f"{provider}_{video_aspect.name}_{search_term.lower().strip()}"
+        if key in cache_data:
+            entry = cache_data[key]
+            # Check 24 hour expiration (86400 seconds)
+            if time.time() - entry["timestamp"] < 86400:
+                results = []
+                for item in entry["items"]:
+                    mi = MaterialInfo()
+                    mi.provider = item.get("provider", provider)
+                    mi.url = item.get("url", "")
+                    mi.duration = item.get("duration", 0)
+                    results.append(mi)
+                logger.info(f"API Cache hit for '{search_term}' using provider '{provider}'")
+                return results
+    except Exception as e:
+        logger.warning(f"Failed to read search cache: {e}")
+    return None
+
+def _save_cached_search(search_term: str, provider: str, video_aspect: VideoAspect, items: List[MaterialInfo]):
+    cache_file = os.path.join(utils.storage_dir(""), "pexels_search_cache.json")
+    try:
+        with _cache_lock:
+            cache_data = {}
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        cache_data = json.load(f)
+                except Exception:
+                    pass
+            key = f"{provider}_{video_aspect.name}_{search_term.lower().strip()}"
+            cache_data[key] = {
+                "timestamp": time.time(),
+                "items": [{"provider": item.provider, "url": item.url, "duration": item.duration} for item in items]
+            }
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save search cache: {e}")
+
+def _get_local_library_fallback(video_aspect: VideoAspect) -> List[MaterialInfo]:
+    cache_dir = utils.storage_dir("cache_videos")
+    if not os.path.exists(cache_dir):
+        return []
+    
+    local_items = []
+    try:
+        files = [os.path.join(cache_dir, f) for f in os.listdir(cache_dir) if f.endswith(".mp4")]
+        # Shuffle files to get variety
+        random.shuffle(files)
+        
+        for f in files:
+            if os.path.exists(f) and os.path.getsize(f) > 0:
+                item = MaterialInfo()
+                item.provider = "local_library"
+                item.url = f
+                # Retrieve duration dynamically
+                try:
+                    clip = VideoFileClip(f)
+                    item.duration = int(clip.duration)
+                    clip.close()
+                except Exception:
+                    item.duration = 10  # Fallback duration
+                local_items.append(item)
+    except Exception as e:
+        logger.warning(f"Failed to load local library fallback: {e}")
+    return local_items
 
 # Thread-safe counter for API key rotation
 _api_key_counter = 0
@@ -60,6 +139,15 @@ def search_videos_pexels(
     aspect = VideoAspect(video_aspect)
     video_orientation = aspect.name
     video_width, video_height = aspect.to_resolution()
+
+    # 1. Try to read from local search cache
+    cached_results = _get_cached_search(search_term, "pexels", aspect)
+    if cached_results is not None:
+        filtered = [item for item in cached_results if item.duration >= minimum_duration]
+        if filtered:
+            return filtered
+
+    # 2. Cache miss, query Pexels API
     api_key = get_api_key("pexels_api_keys")
     headers = {
         "Authorization": api_key,
@@ -82,6 +170,11 @@ def search_videos_pexels(
         video_items = []
         if "videos" not in response:
             logger.error(f"search videos failed: {response}")
+            # Fallback to local library
+            local_fallback = _get_local_library_fallback(aspect)
+            if local_fallback:
+                logger.info(f"Using local library fallback for '{search_term}': {len(local_fallback)} videos found")
+                return local_fallback
             return video_items
         videos = response["videos"]
         # loop through each video in the result
@@ -102,11 +195,28 @@ def search_videos_pexels(
                     item.duration = duration
                     video_items.append(item)
                     break
+        
+        # Save search results to cache
+        if video_items:
+            _save_cached_search(search_term, "pexels", aspect, video_items)
+            
         return video_items
     except Exception as e:
         logger.error(f"search videos failed: {str(e)}")
+        # Fallback to local library
+        local_fallback = _get_local_library_fallback(aspect)
+        if local_fallback:
+            logger.info(f"Using local library fallback for '{search_term}': {len(local_fallback)} videos found")
+            return local_fallback
 
+    # Even if API succeeded but returned no results, try local fallback
+    local_fallback = _get_local_library_fallback(aspect)
+    if local_fallback:
+        logger.info(f"Using local library fallback for '{search_term}': {len(local_fallback)} videos found")
+        return local_fallback
     return []
+
+
 
 
 def search_videos_pixabay(
@@ -242,6 +352,10 @@ def search_videos_coverr(
 
 
 def save_video(video_url: str, save_dir: str = "") -> str:
+    # If the URL is already a local file path that exists, return it directly!
+    if os.path.exists(video_url) and os.path.getsize(video_url) > 0:
+        return video_url
+
     if not save_dir:
         save_dir = utils.storage_dir("cache_videos")
 

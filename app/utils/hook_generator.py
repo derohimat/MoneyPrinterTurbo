@@ -89,12 +89,12 @@ GENERIC_HOOKS = [
 
 # CTA templates for end screens
 CTA_TEMPLATES = [
-    "Follow for more! 🔔",
-    "Like & Subscribe! ❤️",
-    "Share this with someone! 📤",
-    "Follow for daily content! ✨",
-    "Want more? Hit Follow! 🚀",
-    "Don't miss the next one! 🔔",
+    "HIT '+' TO EXPLORE MORE SECRETS OF HISTORY!",
+    "DOUBLE TAP IF YOU LEARNED SOMETHING NEW!",
+    "FOLLOW TO JOIN OUR DAILY HISTORY JOURNEY!",
+    "COMMENT BELOW WHAT WE SHOULD COVER NEXT!",
+    "SHARE THIS TO SPREAD THE KNOWLEDGE!",
+    "SUBSCRIBE TO UNLOCK MORE AMAZING STORIES!",
 ]
 
 

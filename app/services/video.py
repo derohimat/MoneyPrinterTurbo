@@ -1516,17 +1516,22 @@ def generate_video(
             cta_text = hook_generator.get_cta_text()
             if cta_text and video_clip.duration > 5:
                 cta_font = font_path if font_path else "Arial"
+                cta_width = int(video_width * 0.8)
                 cta_clip = TextClip(
-                    text=cta_text,
+                    text=cta_text.upper(),
                     font=cta_font,
-                    font_size=max(32, int(params.font_size * 0.55)),
+                    font_size=64,
                     color="#FFD700",
                     stroke_color="#000000",
-                    stroke_width=2,
+                    stroke_width=3,
+                    method="caption",
+                    size=(cta_width, None),
+                    horizontal_align="center",
+                    vertical_align="center"
                 )
                 cta_start = max(0, video_clip.duration - 3)
                 cta_clip = cta_clip.with_start(cta_start).with_duration(3)
-                cta_clip = cta_clip.with_position(("center", video_height * 0.85))
+                cta_clip = cta_clip.with_position(("center", "center"))
                 overlay_clips.append(cta_clip)
                 logger.info(f"  ⑧ CTA: {cta_text}")
         except Exception as e:
